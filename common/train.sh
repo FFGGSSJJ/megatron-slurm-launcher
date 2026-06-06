@@ -18,7 +18,7 @@
 #   3. Overrides only the knobs it needs. Model/optimizer knobs are documented
 #      at the top of model.sh; parallel/perf knobs at the top of engine.sh;
 #      orchestration knobs in the DEFAULTS block below.
-#   4. Ends with:            source "$(dirname "$0")/../../common/train.sh"
+#   4. Ends with:            source $SCRIPTS_ROOT/common/train.sh
 # =============================================================================
 
 # ---- Locate ourselves (works when sourced under sbatch) ---------------------

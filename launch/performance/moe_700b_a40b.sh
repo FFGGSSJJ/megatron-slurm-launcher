@@ -10,6 +10,10 @@
 #SBATCH --mem=800G
 #SBATCH --no-requeue	# Prevent Slurm to requeue the job if the execution crashes (e.g. node failure) so we don't loose the logs
 
+# Bootstrap paths (SLURM copies the script to its spool dir, so we need an
+# absolute path to find paths.sh; from there $SCRIPTS_ROOT takes over).
+source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/paths.sh
+
 # Project
 PROJECT_NAME=large_scale_moe_performance
 
@@ -45,4 +49,4 @@ NSYS_PROFILER=true
 RANK_TO_PROFILE=96
 
 # Everything else uses the defaults in common/train.sh
-source "$(dirname "$0")/../../common/train.sh"
+source $SCRIPTS_ROOT/common/train.sh

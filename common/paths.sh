@@ -11,6 +11,11 @@
 # -- Scratch / base directories --
 : "${SCRATCH_DIR:=/iopsstor/scratch/cscs/$USER}"
 
+# -- Project root (this repo) --
+# SLURM copies the submitted script to its spool dir, so $0 is unreliable.
+# Launch scripts use this to source train.sh with an absolute path.
+: "${SCRIPTS_ROOT:=/capstor/scratch/cscs/gfu/frameworks/myscripts}"
+
 # -- Codebase --
 : "${MEGATRON_LM_DIR:=/capstor/scratch/cscs/gfu/frameworks/Megatron-LM}"
 
