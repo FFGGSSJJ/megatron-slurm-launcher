@@ -1,7 +1,10 @@
 #!/bin/bash
+SCRIPTS_ROOT="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPTS_ROOT/common/paths.sh"
+source "$SCRIPTS_ROOT/.secrets"
+
 DATE=$(date +%Y-%m-%d)
-LOGDIR=/iopsstor/scratch/cscs/$USER/slurmlogs/$DATE
-source "$(dirname "$0")/.secrets"
+LOGDIR=$SLURM_LOG_DIR/$DATE
 mkdir -p "$LOGDIR"
 sbatch --output=$LOGDIR/%x-%j.out \
         --error=$LOGDIR/%x-%j.err \

@@ -18,13 +18,16 @@
 #   3. Overrides only the knobs it needs. Model/optimizer knobs are documented
 #      at the top of model.sh; parallel/perf knobs at the top of engine.sh;
 #      orchestration knobs in the DEFAULTS block below.
-#   4. Ends with:            source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/train.sh
+#   4. Ends with:            source "$(dirname "$0")/../../common/train.sh"
 # =============================================================================
 
 # ---- Locate ourselves (works when sourced under sbatch) ---------------------
 ENGINE_PATH="${BASH_SOURCE[0]}"
 COMMON_DIR="$(cd "$(dirname "$ENGINE_PATH")" && pwd)"
 SCRIPTS_ROOT="$(cd "$COMMON_DIR/.." && pwd)"
+
+# ---- Environment-specific paths (edit common/paths.sh, not here) -----------
+source "$COMMON_DIR/paths.sh"
 
 # ---- Model architecture -----------------------------------------------------
 # The experiment script must set MODEL_ENV to a models/*.env basename.
@@ -51,11 +54,10 @@ DATE=$(date +%Y-%m-%d)
 # -- Data --
 : "${DATASET_NAME:=climbmix}"           # climbmix | fineweb-edu-100B
 : "${MOCK_DATA:=false}"
-: "${DATASET_CACHE_DIR:=/iopsstor/scratch/cscs/$USER/datasets/cache}"
+# (DATASET_CACHE_DIR comes from common/paths.sh)
 
 # -- Container / codebase --
-: "${IMAGE_ENV:=/iopsstor/scratch/cscs/gfu/ce-images/alps-pytorch2512.toml}"
-: "${MEGATRON_LM_DIR:=/capstor/scratch/cscs/gfu/frameworks/Megatron-LM}"
+# (IMAGE_ENV and MEGATRON_LM_DIR come from common/paths.sh)
 
 # -- Experiment naming --
 : "${PROJECT_NAME:=large_scale_moe_performance}"
@@ -88,7 +90,7 @@ source "$COMMON_DIR/engine.sh"
 # DATASETS
 # =============================================================================
 if [ "$DATASET_NAME" == "fineweb-edu-100B" ]; then
-	DATASETS="/iopsstor/scratch/cscs/anowak/datasets/megatron/llama_tokenized/fineweb-edu-100B/fineweb-edu-100B_00002_tokens 1.0 /iopsstor/scratch/cscs/anowak/datasets/megatron/llama_tokenized/fineweb-edu-100B/fineweb-edu-100B_00000_tokens 1.0 /iopsstor/scratch/cscs/anowak/datasets/megatron/llama_tokenized/fineweb-edu-100B/fineweb-edu-100B_00001_tokens"
+	DATASETS="$FINEWEB_DIR/fineweb-edu-100B_00002_tokens 1.0 $FINEWEB_DIR/fineweb-edu-100B_00000_tokens 1.0 $FINEWEB_DIR/fineweb-edu-100B_00001_tokens"
 fi
 
 # nemotron-climbmix: hftokenizer + swiss-ai/Apertus-8B-2509 vocab
@@ -96,7 +98,7 @@ if [ "$DATASET_NAME" == "climbmix" ]; then
 	NUM_FILES=100
 	for (( i=0; i<$NUM_FILES; i++ ))
 	do
-		DATASETS+="/iopsstor/scratch/cscs/gfu/datasets/climbmix/hftokenized/part_${i}_text_document "
+		DATASETS+="$DATASET_DIR/climbmix/hftokenized/part_${i}_text_document "
 	done
 fi
 
@@ -108,8 +110,8 @@ LOAD_EXP_NAME=$EXP_NAME
 PROJECT_DIR=$MEGATRON_LM_DIR/logs/Meg-Runs/$PROJECT_NAME
 
 EXP_DIR=$PROJECT_DIR/$EXP_NAME
-SAVE_CKPT_DIR=/iopsstor/scratch/cscs/$USER/megatron-runs/$PROJECT_NAME/$EXP_NAME/checkpoints
-LOAD_CKPT_DIR=/iopsstor/scratch/cscs/$USER/megatron-runs/$PROJECT_NAME/$LOAD_EXP_NAME/checkpoints
+SAVE_CKPT_DIR=$CKPT_BASE_DIR/$PROJECT_NAME/$EXP_NAME/checkpoints
+LOAD_CKPT_DIR=$CKPT_BASE_DIR/$PROJECT_NAME/$LOAD_EXP_NAME/checkpoints
 
 TRIGGER_DIR=$EXP_DIR/triggers
 DEBUG_DIR=$EXP_DIR/debug/$SLURM_JOB_ID
@@ -259,7 +261,7 @@ if [ "$LOG_NCCL" = true ]; then
   CMD_PREFIX="NCCL_DEBUG=INFO NCCL_DEBUG_FILE=$DEBUG_DIR/nccl-info-hostname-\$SLURMD_NODENAME-local-rank-\$SLURM_LOCALID-procid-\$SLURM_PROCID.txt $CMD_PREFIX"
 fi
 
-NSYS_DIR="/iopsstor/scratch/cscs/$USER/slurmlogs/$DATE/nsys/"
+NSYS_DIR="$NSYS_LOG_DIR/$DATE/nsys/"
 mkdir -p "$NSYS_DIR"
 
 # NOTE: SLURM_PROCID is only defined inside the srun tasks, NOT in this batch

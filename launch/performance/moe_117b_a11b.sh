@@ -51,11 +51,11 @@ OFFLOADING_NUM_STAGES=2
 
 # -- Recompute / tokenizer --
 RECOMPUTE_MODULES="layernorm"
-TOKENIZER_MODEL=/iopsstor/scratch/cscs/gfu/datasets/tokenizers/Apertus-8B-2509
+TOKENIZER_MODEL=$TOKENIZER_DIR/Apertus-8B-2509
 
 # -- Profiling --
 NSYS_PROFILER=true
 RANK_TO_PROFILE=16
 
 # Everything else uses the defaults in common/train.sh
-source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/train.sh
+source "$(dirname "$0")/../../common/train.sh"

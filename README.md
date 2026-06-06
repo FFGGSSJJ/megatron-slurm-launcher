@@ -3,25 +3,64 @@
 Launching a run = **a shared engine + a thin per-experiment file + a model env**.
 
 ```
-common/model.sh         model & optimizer: arch, attention, optimizer, numerics,
-                        LR schedule, init, tokenizer, MoE model/router args.
+common/paths.sh         environment-specific paths (scratch dirs, codebase,
+                        datasets, checkpoints, logs). Edit once per user/cluster.
+common/model.sh         model & optimizer: arch, attention (GQA/MLA), optimizer
+                        (Adam/Muon/dist_muon), numerics, LR schedule, init,
+                        tokenizer, MoE model/router args.
 common/engine.sh        parallelism & perf: TP/PP/EP/ETP/CP + VPP, MoE perf opts
                         (dispatcher, offloading, fp8 kernels), recompute.
-common/train.sh         orchestrator: sources the two above + model env, then
+common/train.sh         orchestrator: sources the three above + model env, then
                         datasets, naming/dirs, logging/ckpt args, env, profiler,
                         compute-env snapshot, srun.
 models/*.env            model architecture (layers, hidden size, experts, ...).
 launch/*.sh        one short file per run: #SBATCH header + knobs + source train.sh.
+submit.sh               convenience wrapper: sets WANDB key + log dirs, then sbatch.
+tools/                  offline profiling tools (nsight-systems kernel analysis).
 archive/                pre-refactor monolithic scripts, kept for reference.
 ```
 
-The engine is sourced top-to-bottom: `train.sh` → `model.sh` → `engine.sh`.
-You only ever submit `launch/*.sh`.
+The engine is sourced top-to-bottom: `train.sh` → `paths.sh` → `model.sh` → `engine.sh`.
+You only ever submit `launch/*.sh` (or use `submit.sh`).
 
 ## Submit a run
 
 ```bash
-sbatch launch/moe_700b_a40b.sh
+# Direct
+sbatch launch/performance/moe_700b_a40b.sh
+
+# Via the wrapper (adds log dirs + WANDB key from .secrets)
+./submit.sh launch/correctness/moe_7b_1b5.sh
+```
+
+## Directory layout
+
+```
+myscripts/
+├── common/
+│   ├── paths.sh            # environment-specific paths (edit once per user/cluster)
+│   ├── model.sh            # model & optimizer knobs + arg arrays
+│   ├── engine.sh           # parallelism & perf knobs + arg arrays
+│   └── train.sh            # orchestrator (datasets, dirs, launch)
+├── models/                 # one .env per model architecture
+│   ├── moe_7b_a1b5_largeexp.env
+│   ├── moe_117b_a11b_0.env
+│   ├── moe_700b_a40b_1.env
+│   └── ...                 # 16 configs total (7B → 700B)
+├── launch/
+│   ├── correctness/        # small-scale correctness / debugging runs
+│   │   └── moe_7b_1b5.sh
+│   ├── performance/        # large-scale performance runs
+│   │   ├── moe_117b_a11b.sh
+│   │   └── moe_700b_a40b.sh
+│   └── debug.sh            # VS Code tunnel (not a training job)
+├── tools/
+│   ├── nsys_profiler.py         # full nsys kernel breakdown (10 categories)
+│   └── nsys_profiler_simple.py  # simplified 4-category breakdown + pie chart
+├── submit.sh               # sbatch wrapper (sources .secrets for WANDB key)
+├── .secrets                # WANDB_API_KEY (gitignored)
+├── .gitignore
+└── archive/                # legacy scripts (gitignored)
 ```
 
 ## Add a new experiment
@@ -50,12 +89,29 @@ a new optional flag gets a knob with a default at the top of the file, gated
 (`if [ "$MY_KNOB" = true ]; then ... fi`). Every experiment picks it up — no more
 editing N files.
 
+## Secrets
+
+`WANDB_API_KEY` lives in `.secrets` (gitignored). `submit.sh` sources it before
+calling `sbatch`. `train.sh` checks whether `$WANDB_API_KEY` is set and enables
+or disables W&B logging accordingly.
+
+## Profiling tools
+
+`tools/` contains two Python analysers for Nsight Systems `.nsys-rep` files:
+
+| File | Categories | Use case |
+|------|-----------|----------|
+| `nsys_profiler.py` | 10 (GEMM, SDPA, TP/EP/DP/CP comm, PP bubble, sync, host, …) | Detailed top-down analysis of MoE training runs |
+| `nsys_profiler_simple.py` | 4 (Computation, Memory, Communication, Other) | Quick overview with nested pie-chart plots |
+
+Both load via `CUDAProfile.load_from(title, path)` / `CUDAProfileSimple.load_from(title, path)`
+and expose a `.report` property with `.display()` (text table) and `.plot()` (matplotlib).
+
 ## Notes
 
 - The engine archives the experiment file, all three engine files, and the model
   env into each run's `debug/<jobid>/` dir (see `compute_environment.txt`).
-- `WANDB_API_KEY` is centralized in `common/train.sh`. Consider moving it to a
-  sourced secret file instead of committing it.
-- `USE_FP8_DISPATCH` is defined as a knob in `engine.sh` but **not yet
-  wired** to any flag (it has no effect even when `true`). Wire it to
-  `--moe-use-fp8-dispatch` when ready.
+- Supported optimizers: `adam` (default), `muon`, `dist_muon`. Set via `OPTIMIZER=muon`
+  in the experiment file.
+- Supported attention types: `gqa` (default), `mla`. Set via `ATTENTION_TYPE=mla`.
+- `USE_FP8_DISPATCH` wires to `--moe-use-fp8-dispatch` in `engine.sh`.

@@ -10,6 +10,9 @@
 #SBATCH --mem=800G
 #SBATCH --no-requeue	# Prevent Slurm to requeue the job if the execution crashes (e.g. node failure) so we don't loose the logs
 
+# Project
+PROJECT_NAME=large_scale_moe_performance
+
 # Model architecture lives in models/moe_700b_a40b_1.env
 MODEL_ENV=moe_700b_a40b_1
 
@@ -35,11 +38,11 @@ USE_MOCK_ROUTER=true
 
 # -- Recompute / tokenizer --
 RECOMPUTE_MODULES="layernorm mla_up_proj"
-TOKENIZER_MODEL=/iopsstor/scratch/cscs/gfu/datasets/tokenizers/Apertus-8B-2509
+TOKENIZER_MODEL=$TOKENIZER_DIR/Apertus-8B-2509
 
 # -- Profiling --
 NSYS_PROFILER=true
 RANK_TO_PROFILE=96
 
 # Everything else uses the defaults in common/train.sh
-source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/train.sh
+source "$(dirname "$0")/../../common/train.sh"
