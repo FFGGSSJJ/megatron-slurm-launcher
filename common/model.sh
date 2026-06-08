@@ -150,6 +150,12 @@ if [ "$USE_MOCK_ROUTER" = true ]; then
 	)
 fi
 
+if [ -n "$MOE_LATENT_SIZE" ]; then
+	MOE_ARGS+=(
+		--moe-latent-size $MOE_LATENT_SIZE
+	)
+fi
+
 # Args for Adam
 if [ "$OPTIMIZER" == "adam" ]; then
 	REGULARIZATION_ARGS=(
