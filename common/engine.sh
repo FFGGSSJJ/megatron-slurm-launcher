@@ -24,10 +24,13 @@
 : "${TOKEN_DISPATCHER_TYPE:=alltoall}"  # allgather | alltoall
 : "${OVERLAP_MOE_EP_COMM:=false}"        # --overlap-moe-expert-parallel-comm + --delay-wgrad-compute
 : "${USE_EXPERTS_OFFLOADING:=false}"
+: "${USE_OFFLOADING_DEBUG:=false}"        # --moe-offloading-experts-debug-mode
 : "${OFFLOADING_NUM_CHUNKS:=8}"
 : "${OFFLOADING_NUM_STAGES:=2}"
+: "${USE_FP8_MOE_PARAM:=false}"         # --moe-use-inplace-fp8-param + --moe-use-extra-fp8-param-storage (adds fp8moe- prefix)
 : "${USE_FP8_ACTIVATION:=false}"        # --moe-use-fp8-activation
 : "${USE_FP8_DISPATCH:=false}"          # --moe-use-fp8-dispatch (knob defined; not wired yet)
+: "${USE_DETERMINISTIC_TRAINING:=false}"  # reproducibility: TE deterministic mode + env vars
 
 # -- Recompute --
 : "${RECOMPUTE_MODULES:=layernorm}"     # space-separated list, e.g. "layernorm mla_up_proj"
@@ -62,9 +65,18 @@ if [ "$USE_EXPERTS_OFFLOADING" = true ]; then
 		--moe-use-offloading-experts
 		--moe-offloading-num-chunks $OFFLOADING_NUM_CHUNKS
 		--moe-offloading-num-stages $OFFLOADING_NUM_STAGES
-		--moe-use-inplace-fp8-param
-		--moe-use-extra-fp8-param-storage
 	)
+	if [ "$USE_FP8_MOE_PARAM" = true ]; then
+		OPTIMIZATION_ARGS+=(
+			--moe-use-inplace-fp8-param
+			--moe-use-extra-fp8-param-storage
+		)
+	fi
+	if [ "$USE_OFFLOADING_DEBUG" = true ]; then
+		OPTIMIZATION_ARGS+=(
+			--moe-offloading-experts-debug-mode
+		)
+	fi
 fi
 
 if [ "$USE_FP8_DISPATCH" = true ]; then
@@ -98,6 +110,17 @@ DISTRIBUTED_ARGS=(
 if [ -n "$VPP_LAYOUT" ]; then
 	DISTRIBUTED_ARGS+=(
 		--pipeline-model-parallel-layout $VPP_LAYOUT
+	)
+fi
+
+# Deterministic training
+if [ "$USE_DETERMINISTIC_TRAINING" = true ]; then
+	export NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
+	export NCCL_ALGO="Ring"
+	export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
+	OPTIMIZATION_ARGS+=(
+		--deterministic-mode
 	)
 fi
 

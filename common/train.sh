@@ -61,7 +61,7 @@ DATE=$(date +%Y-%m-%d)
 
 # -- Experiment naming --
 : "${PROJECT_NAME:=large_scale_moe_performance}"
-: "${EXP_NAME_SUFFIX:=newmegatron_py2512}"
+: "${EXP_NAME_SUFFIX:=$DATE}"
 
 # -- Checkpointing & resuming --
 : "${CHECKPOINT_STEPS:=100000}"
@@ -105,7 +105,9 @@ fi
 # =============================================================================
 # LOGGING DIRECTORIES & ARTIFACTS  (EXP_NAME mixes model + optimization knobs)
 # =============================================================================
-EXP_NAME=${MODEL_NAME}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-${EXP_NAME_SUFFIX}
+VPP_TAG=$([ -n "$VPP_LAYOUT" ] && echo "-vpp" || echo "")
+FP8_MOE_PREFIX=$([ "$USE_FP8_MOE_PARAM" = true ] && echo "fp8moe-" || echo "")
+EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-${EXP_NAME_SUFFIX}
 LOAD_EXP_NAME=$EXP_NAME
 PROJECT_DIR=$MEGATRON_LM_DIR/logs/Meg-Runs/$PROJECT_NAME
 
@@ -201,7 +203,14 @@ if [ "$BACKUP_CODEBASE" == true ]; then
   MEGATRON_LM_DIR=$BACKUP_CODEBASE_DIR
 fi
 
-echo "[$(date)] Using codebase in $MEGATRON_LM_DIR"
+# ---- Log Megatron-LM git info ------------------------------------------------
+_MEG_BRANCH="$(git -C "$MEGATRON_LM_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+_MEG_COMMIT="$(git -C "$MEGATRON_LM_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+_MEG_DIRTY=""
+if [ -n "$(git -C "$MEGATRON_LM_DIR" status --porcelain 2>/dev/null)" ]; then
+	_MEG_DIRTY=" (dirty)"
+fi
+echo "[$(date)] Using codebase in $MEGATRON_LM_DIR  branch=$_MEG_BRANCH  commit=$_MEG_COMMIT$_MEG_DIRTY"
 
 cd $MEGATRON_LM_DIR
 export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
@@ -314,7 +323,11 @@ echo -e "" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\nNODES: $(scontrol show hostnames $SLURM_JOB_NODELIST)" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
-echo -e "\nMegatron path: $MEGATRON_LM_DIR ($(git -C $MEGATRON_LM_DIR rev-parse --verify HEAD))" >> $COMPUTE_ENVIRONMENT_DIR
+echo -e "\nMegatron path: $MEGATRON_LM_DIR" >> $COMPUTE_ENVIRONMENT_DIR
+echo "  Branch:  $_MEG_BRANCH" >> $COMPUTE_ENVIRONMENT_DIR
+echo "  Commit:  $_MEG_COMMIT$_MEG_DIRTY" >> $COMPUTE_ENVIRONMENT_DIR
+echo "  Remote:  $(git -C "$MEGATRON_LM_DIR" remote get-url origin 2>/dev/null || echo N/A)" >> $COMPUTE_ENVIRONMENT_DIR
+echo "  Describe: $(git -C "$MEGATRON_LM_DIR" describe --tags --always 2>/dev/null || echo N/A)" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\n$(python -m pip list 2>/dev/null || python3 -m pip list 2>/dev/null || echo 'pip not available')" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
