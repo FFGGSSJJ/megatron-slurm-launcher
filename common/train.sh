@@ -107,7 +107,8 @@ fi
 # =============================================================================
 VPP_TAG=$([ -n "$VPP_LAYOUT" ] && echo "-vpp" || echo "")
 FP8_MOE_PREFIX=$([ "$USE_FP8_MOE_PARAM" = true ] && echo "fp8moe-" || echo "")
-EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-${EXP_NAME_SUFFIX}
+_MEG_COMMIT_SHORT="$(git -C "$MEGATRON_LM_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)-$(git -C "$MEGATRON_LM_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-epoverlap${OVERLAP_MOE_EP_COMM}-${_MEG_COMMIT_SHORT}-${EXP_NAME_SUFFIX}
 LOAD_EXP_NAME=$EXP_NAME
 PROJECT_DIR=$MEGATRON_LM_DIR/logs/Meg-Runs/$PROJECT_NAME
 
@@ -116,7 +117,7 @@ SAVE_CKPT_DIR=$CKPT_BASE_DIR/$PROJECT_NAME/$EXP_NAME/checkpoints
 LOAD_CKPT_DIR=$CKPT_BASE_DIR/$PROJECT_NAME/$LOAD_EXP_NAME/checkpoints
 
 TRIGGER_DIR=$EXP_DIR/triggers
-DEBUG_DIR=$EXP_DIR/debug/$SLURM_JOB_ID
+DEBUG_DIR=$PROJECT_DIR/$DATE/$MODEL_NAME/$SLURM_JOB_ID
 COMPUTE_ENVIRONMENT_DIR=$DEBUG_DIR/compute_environment.txt
 GPU_MEM_LOGGING=$DEBUG_DIR/memory_logging.txt
 LOGGING_DIR=$EXP_DIR/logging
@@ -299,6 +300,17 @@ cp "$ENGINE_PATH" "$DEBUG_DIR"
 cp "$COMMON_DIR/model.sh" "$DEBUG_DIR"
 cp "$COMMON_DIR/engine.sh" "$DEBUG_DIR"
 cp "$MODEL_ENV_FILE" "$DEBUG_DIR"
+
+# Record dirty changes in the Megatron-LM codebase
+_MEG_DIRTY_DIFF="$DEBUG_DIR/megatron-dirty.diff"
+if [ -n "$(git -C "$MEGATRON_LM_DIR" status --porcelain 2>/dev/null)" ]; then
+	git -C "$MEGATRON_LM_DIR" diff > "$_MEG_DIRTY_DIFF" 2>/dev/null
+	git -C "$MEGATRON_LM_DIR" diff --cached >> "$_MEG_DIRTY_DIFF" 2>/dev/null
+	git -C "$MEGATRON_LM_DIR" status --short >> "$_MEG_DIRTY_DIFF" 2>/dev/null
+	echo "[$(date)] Dirty changes saved to $_MEG_DIRTY_DIFF"
+else
+	echo "[$(date)] Megatron-LM working tree clean, no dirty diff to save."
+fi
 
 # Clean triggers
 rm -f $TRIGGER_DIR/save

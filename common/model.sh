@@ -20,6 +20,7 @@
 : "${LR_MIN:=0.00007345}"
 : "${SEQ_LEN:=4096}"
 : "${TOTAL_TOKENS:=400000000000}"       # 400B
+: "${LR_WARMUP_TOKENS:=8388608000}"    # ~8B tokens (1000*4096*2048)
 
 # -- Attention --
 : "${ATTENTION_TYPE:=gqa}"              # gqa | mla
@@ -47,7 +48,6 @@
 # ---- Derived (model-only) ---------------------------------------------------
 TOKENS_PER_ITER=$(echo "$GBS * $SEQ_LEN" | bc)
 TRAINING_STEPS=$(echo "scale=0; $TOTAL_TOKENS / $TOKENS_PER_ITER" | bc)
-LR_WARMUP_TOKENS=$(echo "1000 * 4096 * 2048" | bc) # ~8B tokens
 LR_WARMUP_ITERS=$(echo "$LR_WARMUP_TOKENS / $GBS / $SEQ_LEN" | bc)
 
 # ---- Args -------------------------------------------------------------------
