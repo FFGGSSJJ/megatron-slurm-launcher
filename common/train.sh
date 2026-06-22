@@ -107,8 +107,10 @@ fi
 # =============================================================================
 VPP_TAG=$([ -n "$VPP_LAYOUT" ] && echo "-vpp" || echo "")
 FP8_MOE_PREFIX=$([ "$USE_FP8_MOE_PARAM" = true ] && echo "fp8moe-" || echo "")
-_MEG_COMMIT_SHORT="$(git -C "$MEGATRON_LM_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)-$(git -C "$MEGATRON_LM_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
-EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-epoverlap${OVERLAP_MOE_EP_COMM}-${_MEG_COMMIT_SHORT}-${EXP_NAME_SUFFIX}
+_MEG_BRANCH_TAG="$(git -C "$MEGATRON_LM_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+_MEG_BRANCH_TAG="${_MEG_BRANCH_TAG//\//-}"   # sanitize slashes: branch name is embedded into paths/filenames below
+_MEG_COMMIT_SHORT="${_MEG_BRANCH_TAG}-$(git -C "$MEGATRON_LM_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${ACTIVATION_FUNCTION}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-epoverlap${OVERLAP_MOE_EP_COMM}-${_MEG_COMMIT_SHORT}-${EXP_NAME_SUFFIX}
 LOAD_EXP_NAME=$EXP_NAME
 PROJECT_DIR=$MEGATRON_LM_DIR/logs/Meg-Runs/$PROJECT_NAME
 
@@ -369,6 +371,7 @@ if [ "$AUTO_JOB_REQUEUE" = true ]; then
 	echo "[$(date)] $(sbatch --dependency=singleton $0)"
 fi
 
+# export CUDA_LAUNCH_BLOCKING=1
 srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix \
 	--distribution=block:block \
 	--network=disable_rdzv_get \

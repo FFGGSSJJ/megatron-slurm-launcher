@@ -22,6 +22,9 @@
 : "${TOTAL_TOKENS:=400000000000}"       # 400B
 : "${LR_WARMUP_TOKENS:=8388608000}"    # ~8B tokens (1000*4096*2048)
 
+# -- Activation Function --
+: "${ACTIVATION_FUNCTION:=swiglu}"      # swiglu | pnglu
+
 # -- Attention --
 : "${ATTENTION_TYPE:=gqa}"              # gqa | mla
 
@@ -88,10 +91,18 @@ NETWORK_SIZE_ARGS=(
 	--make-vocab-size-divisible-by 128
 	--normalization RMSNorm
 	--norm-epsilon 1e-6
-	--swiglu
 	--untie-embeddings-and-output-weights
 	--attention-backend auto
 )
+
+# Activation function
+if [ "$ACTIVATION_FUNCTION" == "swiglu" ]; then
+	NETWORK_SIZE_ARGS+=(--swiglu)
+elif [ "$ACTIVATION_FUNCTION" == "pnglu" ]; then
+	NETWORK_SIZE_ARGS+=(--pnglu)
+else
+	NETWORK_SIZE_ARGS+=(--swiglu)
+fi
 
 # Attention type: GQA vs MLA. MLA_ARGS is empty for GQA so it expands to nothing.
 MLA_ARGS=()
