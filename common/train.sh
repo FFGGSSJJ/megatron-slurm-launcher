@@ -68,6 +68,7 @@ DATE=$(date +%Y-%m-%d)
 : "${LOAD_CKPT:=false}"
 : "${AUTO_JOB_REQUEUE:=false}"
 : "${BACKUP_CODEBASE:=false}"
+: "${CKPT_FORMAT:=torch_dist}"
 
 # -- Debugging / profiling --
 : "${LOG_NCCL:=false}"
@@ -160,17 +161,17 @@ if [ "$LOAD_CKPT" = true ]; then
 	CHECKPOINTING_ARGS=(
 		--save $SAVE_CKPT_DIR
 		--save-interval $CHECKPOINT_STEPS
-		--ckpt-format torch_dist
+		--ckpt-format $CKPT_FORMAT
 		--load $LOAD_CKPT_DIR
-		--async-save
+		# --async-save
 	)
 else
 	# If not loading from checkpoint, start fresh and ignore existing checkpoints
 	CHECKPOINTING_ARGS=(
 		--save $SAVE_CKPT_DIR
 		--save-interval $CHECKPOINT_STEPS
-		--ckpt-format torch_dist
-		--async-save
+		--ckpt-format $CKPT_FORMAT
+		# --async-save
 	)
 fi
 

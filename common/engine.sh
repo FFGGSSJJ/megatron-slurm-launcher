@@ -131,3 +131,10 @@ if [ "$OPTIMIZER" == "adam" ]; then
 		--overlap-param-gather
 	)
 fi
+
+if [ "$OPTIMIZER" == "md_decoupling" ]; then
+	DISTRIBUTED_ARGS+=(
+		--use-layer-wise-distributed-optimizer
+		--overlap-grad-reduce
+	)
+fi

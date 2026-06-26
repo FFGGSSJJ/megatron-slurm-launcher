@@ -29,7 +29,7 @@
 : "${ATTENTION_TYPE:=gqa}"              # gqa | mla
 
 # -- Optimizer --
-: "${OPTIMIZER:=adam}"                  # adam | muon | dist_muon
+: "${OPTIMIZER:=adam}"                  # adam | muon | dist_muon | md_decoupling
 : "${MUON_SCALE_MODE:=spectral}"
 : "${USE_NESTEROV:=false}"
 
@@ -199,6 +199,30 @@ if [[ "$OPTIMIZER" == "muon" || "$OPTIMIZER" == "dist_muon" ]]; then
 	fi
 fi
 
+# Args for MuonMD
+if [[ "$OPTIMIZER" == "md_decoupling" ]]; then
+	REGULARIZATION_ARGS=(
+		--matrix-lr 1e-2
+		--min-lr-mode absolute
+		--use-orthogonal-updates
+		--hypersphere-mode flat
+		--hypersphere-embedding-mode none
+		--hypersphere-router-mode row
+		--hypersphere-gains-mode rowcol
+		--gain-parametrization softplus
+		--md-router-use-orthogonal-updates True
+		--gains-lr 1e-3             # optional; unset → gains use --lr (1e-3) base
+		--muon-scale-mode shape_up
+		--muon-momentum 0.95
+		--muon-use-nesterov
+		--hypersphere-scale-out-proj-init
+	)
+
+	# MuonMD's parametrized/transformed optimizer state is not compatible with
+	# the sharded torch_dist format; force the legacy torch format instead.
+	CKPT_FORMAT=torch
+fi
+
 TRAINING_ARGS=(
 	--micro-batch-size $MBS
 	--global-batch-size $GBS
@@ -233,6 +257,14 @@ LEARNING_RATE_ARGS=(
 	--lr-wsd-decay-style linear  # WSD schedule
 	--lr-wsd-decay-iters 100  # WSD decay will be a different run
 )
+
+# LR setup for MuonMD
+if [ "$OPTIMIZER" == "md_decoupling" ]; then
+	LEARNING_RATE_ARGS+=(
+		--lr-decay-style linear	# linear decay for MuonMD
+		--lr-warmup-samples 0	# disable warmup for MuonMD
+	)
+fi
 
 TOKENIZER_ARGS=(
 	--tokenizer-type HuggingFaceTokenizer
