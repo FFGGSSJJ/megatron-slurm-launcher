@@ -111,7 +111,7 @@ FP8_MOE_PREFIX=$([ "$USE_FP8_MOE_PARAM" = true ] && echo "fp8moe-" || echo "")
 _MEG_BRANCH_TAG="$(git -C "$MEGATRON_LM_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 _MEG_BRANCH_TAG="${_MEG_BRANCH_TAG//\//-}"   # sanitize slashes: branch name is embedded into paths/filenames below
 _MEG_COMMIT_SHORT="${_MEG_BRANCH_TAG}-$(git -C "$MEGATRON_LM_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
-EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${ACTIVATION_FUNCTION}-${OPTIMIZER}-${MUON_SCALE_MODE}-nestrov_${USE_NESTEROV}-${DATASET_NAME}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-fp8act${USE_FP8_ACTIVATION}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-epoverlap${OVERLAP_MOE_EP_COMM}-${_MEG_COMMIT_SHORT}-${EXP_NAME_SUFFIX}
+EXP_NAME=${FP8_MOE_PREFIX}${MODEL_NAME}-${ACTIVATION_FUNCTION}-${OPTIMIZER}-${SLURM_NNODES}n-${SEQ_LEN}sl-${GBS}gbsz-${MBS}mbsz-${LR}lr-${TP}tp-${PP}pp-${EP}ep-${ETP}etp-${CP}cp${VPP_TAG}-mockr${USE_MOCK_ROUTER}-off${USE_EXPERTS_OFFLOADING}-dbg${USE_OFFLOADING_DEBUG}-epoverlap${OVERLAP_MOE_EP_COMM}-${_MEG_COMMIT_SHORT}-${EXP_NAME_SUFFIX}
 LOAD_EXP_NAME=$EXP_NAME
 PROJECT_DIR=$MEGATRON_LM_DIR/logs/Meg-Runs/$PROJECT_NAME
 
@@ -219,6 +219,27 @@ echo "[$(date)] Using codebase in $MEGATRON_LM_DIR  branch=$_MEG_BRANCH  commit=
 cd $MEGATRON_LM_DIR
 export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 
+# ---- UCCL flex/DeepEP dispatcher: build per-job + expose on PYTHONPATH -------
+# The wrapper's deep_ep must shadow the container's pre-installed stock deep_ep
+# (/opt/venv/.../deep_ep), otherwise Buffer() runs stock DeepEP's NVLink-P2P
+# check which fails on Alps GH200. Host PYTHONPATH does NOT reliably reach the
+# pyxis container (training only finds Megatron because pretrain_gpt.py sits on
+# sys.path[0]), so we ALSO re-export it *inside* the srun step via
+# UCCL_ENV_PREFIX to guarantee the wrapper precedes site-packages on sys.path.
+UCCL_ENV_PREFIX=""
+if [ "$USE_UCCL" = true ]; then
+	source "$COMMON_DIR/uccl.sh"
+	if [ "$RUN_UCCL_INSTALL" = true ]; then
+		install_uccl
+	elif [ ! -d "$UCCL_INSTALL_TARGET" ]; then
+		echo "RUN_UCCL_INSTALL=false but UCCL_INSTALL_TARGET missing: $UCCL_INSTALL_TARGET" >&2
+		exit 1
+	fi
+	export PYTHONPATH="$UCCL_PYTHONPATH:$PYTHONPATH"
+	UCCL_ENV_PREFIX="export PYTHONPATH=$UCCL_PYTHONPATH:\$PYTHONPATH;"
+	echo "[$(date)] UCCL on PYTHONPATH: $UCCL_PYTHONPATH"
+fi
+
 # Data Args
 if [ "$MOCK_DATA" = true ]; then
   DATA_ARGS="${DATA_ARGS[@]} --mock-data"
@@ -285,7 +306,7 @@ mkdir -p "$NSYS_DIR"
 NSYS_LAUNCHER=""
 if [ "$NSYS_PROFILER" = true ]; then
 	NSYS_LAUNCHER="nsys profile -s none --trace=nvtx,cudnn,cublas,cuda \
-		--output=${NSYS_DIR}/nsys-${EXP_NAME}-rank${RANK_TO_PROFILE} \
+		--output=${NSYS_DIR}/nsys-${MODEL_NAME}-${SLURM_JOB_ID}-rank${RANK_TO_PROFILE} \
 		--force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop"
 	TRAINING_CMD="$TRAINING_CMD --profile --profile-step-start $NSYS_PROFILER_START_ITER --profile-step-end $NSYS_PROFILER_END_ITER --profile-ranks $RANK_TO_PROFILE"
 fi
@@ -302,6 +323,7 @@ cp "$0" "$DEBUG_DIR"
 cp "$ENGINE_PATH" "$DEBUG_DIR"
 cp "$COMMON_DIR/model.sh" "$DEBUG_DIR"
 cp "$COMMON_DIR/engine.sh" "$DEBUG_DIR"
+[ "$USE_UCCL" = true ] && cp "$COMMON_DIR/uccl.sh" "$DEBUG_DIR"
 cp "$MODEL_ENV_FILE" "$DEBUG_DIR"
 
 # Record dirty changes in the Megatron-LM codebase
@@ -360,6 +382,10 @@ export TRITON_CACHE_DIR=${LOCAL_CACHE_BASE}/triton_cache/${SLURM_PROCID}
 export TORCHINDUCTOR_CACHE_DIR=${LOCAL_CACHE_BASE}/inductor_cache/${SLURM_PROCID}
 mkdir -p "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
 
+# Per-rank torch extensions (compiled kernels) on node-local storage
+export TORCH_EXTENSIONS_DIR=${SLURM_TMPDIR:-/tmp}/torch_ext/$SLURM_JOB_ID
+mkdir -p "$TORCH_EXTENSIONS_DIR"
+
 SRUN_ARGS=" \
 	-lu \
 	--cpus-per-task $SLURM_CPUS_PER_TASK \
@@ -382,7 +408,7 @@ srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix \
 		if [ \"\$SLURM_PROCID\" -eq \"$RANK_TO_PROFILE\" ]; then
 			LAUNCHER=\"$NSYS_LAUNCHER\"
 		fi
-		RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+		$UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
 
 echo "END TIME: $(date)"
 

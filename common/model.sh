@@ -45,8 +45,9 @@
 : "${MOE_ROUTER_NUM_GROUPS:=}"          # node-limited routing (empty = off)
 : "${MOE_ROUTER_GROUP_TOPK:=}"
 
-# -- Tokenizer --
+# -- Tokenizer / Vocabulary --
 : "${TOKENIZER_MODEL:=swiss-ai/Apertus-8B-2509}"
+: "${VOCAB_SIZE:=}"               # explicit vocab size (empty = derive from tokenizer)
 
 # ---- Derived (model-only) ---------------------------------------------------
 TOKENS_PER_ITER=$(echo "$GBS * $SEQ_LEN" | bc)
@@ -95,6 +96,11 @@ NETWORK_SIZE_ARGS=(
 	--attention-backend auto
 )
 
+# Explicit vocab size (otherwise derived from the tokenizer)
+if [ -n "$VOCAB_SIZE" ]; then
+	NETWORK_SIZE_ARGS+=(--vocab-size $VOCAB_SIZE)
+fi
+
 # Activation function
 if [ "$ACTIVATION_FUNCTION" == "swiglu" ]; then
 	NETWORK_SIZE_ARGS+=(--swiglu)
@@ -119,6 +125,8 @@ if [ "$ATTENTION_TYPE" == "mla" ]; then
 		--rotary-scaling-factor 40
 		--mscale 1.0
 		--mscale-all-dim 1.0
+
+		--muon-split-mla-per-head
 	)
 else
 	NETWORK_SIZE_ARGS+=(

@@ -34,3 +34,8 @@
 : "${CKPT_BASE_DIR:=$SCRATCH_DIR/megatron-runs}"
 : "${SLURM_LOG_DIR:=$SCRATCH_DIR/slurmlogs}"
 : "${NSYS_LOG_DIR:=$SCRATCH_DIR/slurmlogs}"
+
+# -- UCCL (MoE flex/DeepEP dispatcher; built per-job from source) --
+: "${UCCL_SOURCE_DIR:=/capstor/scratch/cscs/gfu/frameworks/uccl}"  # uccl checkout (override to your own clone)
+: "${UCCL_INSTALL_BASE:=$SCRATCH_DIR/uccl_python}"       # per-job build/install lands under here
+: "${UCCL_CONTAINER_ENV_FILE:=$IMAGE_ENV}"               # build container (keep == training image for ABI match)

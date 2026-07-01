@@ -21,7 +21,9 @@
 : "${VPP_LAYOUT:=}"                     # pipeline-model-parallel-layout (empty = off)
 
 # -- MoE performance optimizations --
-: "${TOKEN_DISPATCHER_TYPE:=alltoall}"  # allgather | alltoall
+: "${TOKEN_DISPATCHER_TYPE:=alltoall}"  # allgather | alltoall | flex
+: "${USE_UCCL:=false}"                   # UCCL flex/DeepEP dispatcher (builds UCCL, see common/uccl.sh)
+: "${FLEX_DISPATCHER_BACKEND:=deepep}"   # deepep | hybridep (only used when dispatcher is flex)
 : "${OVERLAP_MOE_EP_COMM:=false}"        # --overlap-moe-expert-parallel-comm + --delay-wgrad-compute
 : "${USE_EXPERTS_OFFLOADING:=false}"
 : "${USE_OFFLOADING_DEBUG:=false}"        # --moe-offloading-experts-debug-mode
@@ -40,6 +42,11 @@ DP=$(echo "$SLURM_NNODES * 4 / $TP / $PP / $CP" | bc)
 GA=$(echo "$GBS / $MBS / $DP" | bc)
 echo "Gradient Accumulation Steps (GA) calculated as: $GA"
 
+# UCCL rides Megatron's flex dispatcher with a DeepEP-compatible backend.
+if [ "$USE_UCCL" = true ]; then
+	TOKEN_DISPATCHER_TYPE=flex
+fi
+
 # ---- Args -------------------------------------------------------------------
 # moe related optimizations
 OPTIMIZATION_ARGS=(
@@ -51,6 +58,12 @@ OPTIMIZATION_ARGS=(
 	--moe-permute-fusion # buggy with allgather
 	--moe-router-fusion
 )
+
+if [ "$TOKEN_DISPATCHER_TYPE" = flex ]; then
+	OPTIMIZATION_ARGS+=(
+		--moe-flex-dispatcher-backend $FLEX_DISPATCHER_BACKEND
+	)
+fi
 
 # EP A2A communication overlap
 if [ "$OVERLAP_MOE_EP_COMM" = true ]; then
@@ -136,5 +149,6 @@ if [ "$OPTIMIZER" == "md_decoupling" ]; then
 	DISTRIBUTED_ARGS+=(
 		--use-layer-wise-distributed-optimizer
 		--overlap-grad-reduce
+		# --overlap-param-gather
 	)
 fi

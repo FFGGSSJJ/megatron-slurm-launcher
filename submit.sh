@@ -3,9 +3,12 @@ SCRIPTS_ROOT="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPTS_ROOT/common/paths.sh"
 source "$SCRIPTS_ROOT/.secrets"
 
-# Auto-derive job name from the model env referenced in the launch script.
+# Auto-derive job name from the model env. Prefer a MODEL_ENV provided in the
+# environment (e.g. by a sweep driver); otherwise read it from the launch script.
 LAUNCH_SCRIPT="$1"
-MODEL_ENV=$(grep -E '^MODEL_ENV=' "$LAUNCH_SCRIPT" 2>/dev/null | head -1 | cut -d= -f2)
+if [[ -z "$MODEL_ENV" ]]; then
+    MODEL_ENV=$(grep -E '^MODEL_ENV=' "$LAUNCH_SCRIPT" 2>/dev/null | head -1 | cut -d= -f2)
+fi
 if [[ -n "$MODEL_ENV" && -f "$SCRIPTS_ROOT/models/${MODEL_ENV}.env" ]]; then
     source "$SCRIPTS_ROOT/models/${MODEL_ENV}.env"
     JOB_NAME="$MODEL_NAME"
