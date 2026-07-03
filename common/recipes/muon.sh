@@ -1,0 +1,35 @@
+#!/bin/bash
+# =============================================================================
+# common/recipes/muon.sh  —  Muon optimizer recipe
+#
+# Sourced by common/model.sh when OPTIMIZER is muon or dist_muon (via the
+# optimizer dispatcher). Do not run directly. Inherits OPTIMIZER,
+# MUON_SCALE_MODE, USE_NESTEROV, LR, LR_MIN and LR_WARMUP_ITERS from the caller;
+# defines REGULARIZATION_ARGS and LEARNING_RATE_ARGS for train.sh's TRAINING_CMD.
+# =============================================================================
+
+REGULARIZATION_ARGS=(
+	--attention-dropout 0.0
+	--hidden-dropout 0.0
+	--weight-decay 0.1
+	--clip-grad 1.0
+
+	--muon-scale-mode $MUON_SCALE_MODE
+	--muon-momentum 0.95
+	--muon-num-ns-steps 5
+)
+
+if [ "$USE_NESTEROV" = true ]; then
+	REGULARIZATION_ARGS+=(
+		--muon-use-nesterov
+	)
+fi
+
+LEARNING_RATE_ARGS=(
+	--lr $LR
+	--min-lr $LR_MIN  # x10 reduction
+	--lr-decay-style WSD  # WSD schedule
+	--lr-warmup-iters $LR_WARMUP_ITERS
+	--lr-wsd-decay-style linear  # WSD schedule
+	--lr-wsd-decay-iters 100  # WSD decay will be a different run
+)

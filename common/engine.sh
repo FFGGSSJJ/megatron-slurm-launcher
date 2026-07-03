@@ -31,6 +31,7 @@
 : "${OFFLOADING_NUM_STAGES:=2}"
 : "${USE_FP8_MOE_PARAM:=false}"         # --moe-use-inplace-fp8-param + --moe-use-extra-fp8-param-storage (adds fp8moe- prefix)
 : "${USE_FP8_ACTIVATION:=false}"        # --moe-use-fp8-activation
+: "${MOE_OFFLOAD_ACTIVATIONS:=''}"		# --moe-offload-activations
 : "${USE_FP8_DISPATCH:=false}"          # --moe-use-fp8-dispatch (knob defined; not wired yet)
 : "${USE_DETERMINISTIC_TRAINING:=false}"  # reproducibility: TE deterministic mode + env vars
 
@@ -83,6 +84,7 @@ if [ "$USE_EXPERTS_OFFLOADING" = true ]; then
 		OPTIMIZATION_ARGS+=(
 			--moe-use-inplace-fp8-param
 			--moe-use-extra-fp8-param-storage
+			--moe-offload-activations $MOE_OFFLOAD_ACTIVATIONS
 		)
 	fi
 	if [ "$USE_OFFLOADING_DEBUG" = true ]; then

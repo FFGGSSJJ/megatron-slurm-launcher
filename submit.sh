@@ -19,8 +19,18 @@ fi
 DATE=$(date +%Y-%m-%d)
 LOGDIR=$SLURM_LOG_DIR/$DATE
 mkdir -p "$LOGDIR"
+
+# Caller-injected sbatch options (e.g. --dependency=afterok:JOBID, used by
+# dependency_submit.sh). These MUST precede the launch script on the sbatch
+# command line: sbatch only parses options that come before the script path, so
+# a flag passed as a trailing positional arg would be handed to the script
+# instead. Word-split on whitespace (read -ra, no globbing). Empty by default
+# => no change to a normal submission.
+read -ra _extra_sbatch_args <<< "${EXTRA_SBATCH_ARGS:-}"
+
 sbatch --job-name="$JOB_NAME" \
         --output=$LOGDIR/%x-%j.out \
         --error=$LOGDIR/%x-%j.err \
         --reservation=SD-69241-apertus-1-5-0 \
+        "${_extra_sbatch_args[@]}" \
         "$@"

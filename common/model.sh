@@ -6,7 +6,9 @@
 # (models/*.env: NUM_LAYERS, HIDDEN_SIZE, NUM_EXPERTS, ...) has already been
 # sourced. Owns everything about *what* is trained and *how it is optimized*:
 # architecture/attention, optimizer, numerics/precision, LR schedule, init,
-# tokenizer, and the MoE model/router args.
+# tokenizer, and the MoE model/router args. The per-optimizer REGULARIZATION_ARGS
+# and LEARNING_RATE_ARGS are delegated to recipes under common/recipes/ (sourced
+# via the OPTIMIZER dispatcher below).
 #
 # Knobs + their defaults live at the top; an experiment overrides one simply by
 # assigning it before sourcing train.sh.
@@ -126,7 +128,7 @@ if [ "$ATTENTION_TYPE" == "mla" ]; then
 		--mscale 1.0
 		--mscale-all-dim 1.0
 
-		--muon-split-mla-per-head
+		# --muon-split-mla-per-head
 	)
 else
 	NETWORK_SIZE_ARGS+=(
@@ -175,61 +177,35 @@ if [ -n "$MOE_LATENT_SIZE" ]; then
 	)
 fi
 
-# Args for Adam
-if [ "$OPTIMIZER" == "adam" ]; then
-	REGULARIZATION_ARGS=(
-		--attention-dropout 0.0
-		--hidden-dropout 0.0
-		--weight-decay 0.1
-		--clip-grad 1.0
-		--adam-beta1 0.9
-		--adam-beta2 0.95
+if [ -n "$MOE_ASYMMETRIC_LATENT_SIZE" ]; then
+	MOE_ARGS+=(
+		--moe-asymmetric-latent-size $MOE_ASYMMETRIC_LATENT_SIZE
 	)
 fi
 
-# Args for Muon
-if [[ "$OPTIMIZER" == "muon" || "$OPTIMIZER" == "dist_muon" ]]; then
-	REGULARIZATION_ARGS=(
-		--attention-dropout 0.0
-		--hidden-dropout 0.0
-		--weight-decay 0.1
-		--clip-grad 1.0
-
-		--muon-scale-mode $MUON_SCALE_MODE
-		--muon-momentum 0.95
-		--muon-num-ns-steps 5
+if [ -n "$MOE_EXPERT_ASYMMETRIC_LATENT_SIZE" ]; then
+	MOE_ARGS+=(
+		--moe-expert-asymmetric-latent-size $MOE_EXPERT_ASYMMETRIC_LATENT_SIZE
 	)
-
-	if [ "$USE_NESTEROV" = true ]; then
-		REGULARIZATION_ARGS+=(
-			--muon-use-nesterov
-		)
-	fi
 fi
 
-# Args for MuonMD
-if [[ "$OPTIMIZER" == "md_decoupling" ]]; then
-	REGULARIZATION_ARGS=(
-		--matrix-lr 1e-2
-		--min-lr-mode absolute
-		--use-orthogonal-updates
-		--hypersphere-mode flat
-		--hypersphere-embedding-mode none
-		--hypersphere-router-mode row
-		--hypersphere-gains-mode rowcol
-		--gain-parametrization softplus
-		--md-router-use-orthogonal-updates True
-		--gains-lr 1e-3             # optional; unset → gains use --lr (1e-3) base
-		--muon-scale-mode shape_up
-		--muon-momentum 0.95
-		--muon-use-nesterov
-		--hypersphere-scale-out-proj-init
-	)
-
-	# MuonMD's parametrized/transformed optimizer state is not compatible with
-	# the sharded torch_dist format; force the legacy torch format instead.
-	CKPT_FORMAT=torch
-fi
+# ---- Optimizer recipe ----
+# Each optimizer's REGULARIZATION_ARGS and LEARNING_RATE_ARGS live in their own
+# recipe under common/recipes/. The knobs (OPTIMIZER, MUON_SCALE_MODE,
+# USE_NESTEROV, LR, LR_MIN, LR_WARMUP_ITERS) stay defined here; the recipe
+# consumes them and may set side effects like CKPT_FORMAT for MuonMD.
+# dist_muon reuses the muon recipe.
+case "$OPTIMIZER" in
+	adam)
+		source "$COMMON_DIR/recipes/adam.sh" ;;
+	muon|dist_muon)
+		source "$COMMON_DIR/recipes/muon.sh" ;;
+	md_decoupling)
+		source "$COMMON_DIR/recipes/md_decoupling.sh" ;;
+	*)
+		echo "Unknown OPTIMIZER: '$OPTIMIZER' (expected adam|muon|dist_muon|md_decoupling)" >&2
+		exit 1 ;;
+esac
 
 TRAINING_ARGS=(
 	--micro-batch-size $MBS
@@ -256,23 +232,6 @@ INITIALIZATION_ARGS=(
 	--seed 28
 	--init-method-std 0.008944
 )
-
-LEARNING_RATE_ARGS=(
-	--lr $LR
-	--min-lr $LR_MIN  # x10 reduction
-	--lr-decay-style WSD  # WSD schedule
-	--lr-warmup-iters $LR_WARMUP_ITERS
-	--lr-wsd-decay-style linear  # WSD schedule
-	--lr-wsd-decay-iters 100  # WSD decay will be a different run
-)
-
-# LR setup for MuonMD
-if [ "$OPTIMIZER" == "md_decoupling" ]; then
-	LEARNING_RATE_ARGS+=(
-		--lr-decay-style linear	# linear decay for MuonMD
-		--lr-warmup-samples 0	# disable warmup for MuonMD
-	)
-fi
 
 TOKENIZER_ARGS=(
 	--tokenizer-type HuggingFaceTokenizer
