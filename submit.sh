@@ -7,7 +7,10 @@ source "$SCRIPTS_ROOT/.secrets"
 # environment (e.g. by a sweep driver); otherwise read it from the launch script.
 LAUNCH_SCRIPT="$1"
 if [[ -z "$MODEL_ENV" ]]; then
-    MODEL_ENV=$(grep -E '^MODEL_ENV=' "$LAUNCH_SCRIPT" 2>/dev/null | head -1 | cut -d= -f2)
+    # Match both the plain form `MODEL_ENV=foo` and the overridable idiom
+    # `: "${MODEL_ENV:=foo}"` (used by sweep-driven launch scripts).
+    MODEL_ENV=$(grep -E '(^MODEL_ENV=|MODEL_ENV:=)' "$LAUNCH_SCRIPT" 2>/dev/null \
+        | head -1 | sed -E 's/.*MODEL_ENV(:?=)//; s/["}]//g')
 fi
 if [[ -n "$MODEL_ENV" && -f "$SCRIPTS_ROOT/models/${MODEL_ENV}.env" ]]; then
     source "$SCRIPTS_ROOT/models/${MODEL_ENV}.env"
