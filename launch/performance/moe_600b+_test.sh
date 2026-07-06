@@ -30,7 +30,6 @@ SEQ_LEN=4096
 
 # -- Tokenizer / Vocabulary --
 VOCAB_SIZE=335232
-
 MOCK_DATA=true
 
 # -- Checkpointing --
@@ -47,20 +46,24 @@ VPP_LAYOUT="Et\\|\\(tt\\|\\)*30,L"
 
 # -- Attention / optimizer --
 ATTENTION_TYPE=mla
-OPTIMIZER=adam
+OPTIMIZER=md_decoupling
 
 # -- MoE --
-USE_FP8_DISPATCH=false
 USE_FP8_ACTIVATION=false
 OVERLAP_MOE_EP_COMM=true
 USE_MOCK_ROUTER=true
 
 # -- MoE offloading --
-USE_EXPERTS_OFFLOADING=false
-USE_FP8_MOE_PARAM=false
-# Overridable per model (must divide num_local_experts = NUM_EXPERTS/EP).
-: "${OFFLOADING_NUM_CHUNKS:=8}"
-OFFLOADING_NUM_STAGES=2
+USE_MOE_OFFLOADING=true
+if [ "$USE_MOE_OFFLOADING" = true ]; then
+    USE_FP8_DISPATCH=false
+	USE_EXPERTS_OFFLOADING=true
+    USE_FP8_MOE_PARAM=true
+	OFFLOADING_NUM_CHUNKS=4
+	OFFLOADING_NUM_STAGES=2
+	MOE_OFFLOAD_ACTIVATIONS="moe_input moe_fc1_output"
+	USE_OFFLOADING_DEBUG=false
+fi
 
 # -- UCCL --
 USE_UCCL=true

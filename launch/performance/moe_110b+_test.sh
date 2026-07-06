@@ -28,6 +28,10 @@ LR=0.0007345
 LR_MIN=0.00007345
 SEQ_LEN=8192
 
+# -- Tokenizer / Vocabulary --
+VOCAB_SIZE=335232
+MOCK_DATA=true
+
 # -- Checkpointing --
 CHECKPOINT_STEPS=50000
 
@@ -45,7 +49,6 @@ ATTENTION_TYPE=gqa
 OPTIMIZER=md_decoupling
 
 # -- MoE --
-USE_FP8_DISPATCH=true
 USE_FP8_ACTIVATION=false
 OVERLAP_MOE_EP_COMM=true
 USE_MOCK_ROUTER=true
