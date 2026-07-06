@@ -15,7 +15,7 @@
 source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/paths.sh
 
 # Project
-PROJECT_NAME=uccl_ep_stability
+PROJECT_NAME=large_scale_moe_performance
 
 # Model architecture lives in models/moe_110b+/*.env
 # Overridable (so launch/performance/moe_110b+_sweep.sh can set it per run).
