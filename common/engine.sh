@@ -84,8 +84,13 @@ if [ "$USE_EXPERTS_OFFLOADING" = true ]; then
 		OPTIMIZATION_ARGS+=(
 			--moe-use-inplace-fp8-param
 			--moe-use-extra-fp8-param-storage
-			--moe-offload-activations $MOE_OFFLOAD_ACTIVATIONS
 		)
+
+		if [ -n "$MOE_OFFLOAD_ACTIVATIONS" ]; then
+			OPTIMIZATION_ARGS+=(
+				--moe-offload-activations $MOE_OFFLOAD_ACTIVATIONS
+			)
+		fi
 	fi
 	if [ "$USE_OFFLOADING_DEBUG" = true ]; then
 		OPTIMIZATION_ARGS+=(
