@@ -87,6 +87,16 @@ DATE=$(date +%Y-%m-%d)
 source "$COMMON_DIR/model.sh"
 source "$COMMON_DIR/engine.sh"
 
+# ---- Model size / FLOPs summary ----------------------------------------------
+MODEL_STATS=""
+if command -v python3 >/dev/null 2>&1; then
+	MODEL_STATS="$(python3 "$SCRIPTS_ROOT/tools/flops_calculator.py" "$MODEL_ENV" \
+		--seq-len "$SEQ_LEN" --gbs "$GBS" --attention-type "$ATTENTION_TYPE" \
+		${VOCAB_SIZE:+--vocab-size "$VOCAB_SIZE"} 2>&1)" || \
+		echo "[$(date)] flops_calculator failed (non-fatal)" >&2
+	echo "$MODEL_STATS"
+fi
+
 # =============================================================================
 # DATASETS
 # =============================================================================
@@ -361,6 +371,8 @@ cat $SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment >> $COMPUTE_ENVIRONMENT_D
 echo -e "" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\nNODES: $(scontrol show hostnames $SLURM_JOB_NODELIST)" >> $COMPUTE_ENVIRONMENT_DIR
+printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
+echo -e "\nModel stats (tools/flops_calculator.py):\n$MODEL_STATS" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\nMegatron path: $MEGATRON_LM_DIR" >> $COMPUTE_ENVIRONMENT_DIR
 echo "  Branch:  $_MEG_BRANCH" >> $COMPUTE_ENVIRONMENT_DIR
