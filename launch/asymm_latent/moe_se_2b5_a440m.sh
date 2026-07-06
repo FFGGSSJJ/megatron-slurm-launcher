@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #SBATCH --account=infra01
-#SBATCH --time=12:00:00
+#SBATCH --time=6:00:00
 #SBATCH --job-name=moe_2b5_a440m
-#SBATCH --nodes=2
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=72
@@ -18,7 +18,7 @@ source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/paths.sh
 PROJECT_NAME=asymm_latent_moe
 
 # Model architecture lives in models/moe_117b_a11b_0.env
-MODEL_ENV=moe_2b/moe_2b5_a440m_latent
+MODEL_ENV=moe_2b/moe_2b5_a440m_se
 # MEGATRON_LM_DIR='/capstor/scratch/cscs/gfu/frameworks/Megatron-LM-sai'
 
 # -- Training --
@@ -33,8 +33,8 @@ LR_WARMUP_TOKENS=2000000000 # 2B tokens
 
 # -- Checkpointing --
 LOAD_CKPT=true
-LOAD_EXP_NAME=moe_lt_2b5_a440m-swiglu-md_decoupling-2n-4096sl-128gbsz-2mbsz-1e-3lr-1tp-1pp-1ep-1etp-1cp-mockrfalse-offfalse-dbgfalse-epoverlapfalse-fuguan-asymm-latent-729ca457-2026-07-02
-CHECKPOINT_STEPS=2000
+LOAD_EXP_NAME=moe_2b5_a440m_se-swiglu-md_decoupling-8n-4096sl-128gbsz-2mbsz-1e-3lr-1tp-1pp-1ep-1etp-1cp-mockrfalse-offfalse-dbgfalse-epoverlapfalse-fuguan-moe-act-offload-8447c3ee-2026-07-03
+CHECKPOINT_STEPS=4000
 
 # -- Parallelism --
 TP=1
@@ -42,7 +42,6 @@ ETP=1
 EP=1
 PP=1
 CP=1
-# VPP_LAYOUT="Ett\\|\\(tttttttt\\|\\)*2,ttL"
 
 # -- Attention / optimizer --
 ATTENTION_TYPE=gqa

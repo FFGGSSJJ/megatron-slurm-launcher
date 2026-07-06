@@ -32,9 +32,9 @@ TOTAL_TOKENS=15000000000 # 15B tokens
 LR_WARMUP_TOKENS=2000000000 # 2B tokens
 
 # -- Checkpointing --
-LOAD_CKPT=false
-LOAD_EXP_NAME=moe_lt_2b5_a440m-swiglu-md_decoupling-2n-4096sl-128gbsz-2mbsz-1e-3lr-1tp-1pp-1ep-1etp-1cp-mockrfalse-offfalse-dbgfalse-epoverlapfalse-fuguan-asymm-latent-729ca457-2026-07-02
-CHECKPOINT_STEPS=2000
+LOAD_CKPT=true
+LOAD_EXP_NAME=moe_lt4_2b5_a440m-swiglu-md_decoupling-8n-4096sl-128gbsz-2mbsz-1e-3lr-1tp-1pp-4ep-1etp-1cp-mockrfalse-offfalse-dbgfalse-epoverlapfalse-fuguan-moe-act-offload-8447c3ee-2026-07-03
+CHECKPOINT_STEPS=4000
 
 # -- Parallelism --
 TP=1

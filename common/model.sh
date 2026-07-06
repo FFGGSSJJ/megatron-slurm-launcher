@@ -177,9 +177,15 @@ if [ -n "$MOE_LATENT_SIZE" ]; then
 	)
 fi
 
-if [ -n "$MOE_ASYMMETRIC_LATENT_SIZE" ]; then
+if [ -n "$MOE_ASYMMETRIC_FC1_LATENT_SIZE" ]; then
 	MOE_ARGS+=(
-		--moe-asymmetric-latent-size $MOE_ASYMMETRIC_LATENT_SIZE
+		--moe-asymmetric-fc1-latent-size $MOE_ASYMMETRIC_FC1_LATENT_SIZE
+	)
+fi
+
+if [ -n "$MOE_ASYMMETRIC_FC2_LATENT_SIZE" ]; then
+	MOE_ARGS+=(
+		--moe-asymmetric-fc2-latent-size $MOE_ASYMMETRIC_FC2_LATENT_SIZE
 	)
 fi
 

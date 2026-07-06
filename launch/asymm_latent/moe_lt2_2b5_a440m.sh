@@ -18,7 +18,7 @@ source /capstor/scratch/cscs/gfu/frameworks/myscripts/common/paths.sh
 PROJECT_NAME=asymm_latent_moe
 
 # Model architecture lives in models/moe_117b_a11b_0.env
-MODEL_ENV=moe_2b/moe_2b5_a440m_aelatent
+MODEL_ENV=moe_2b/moe_2b5_a440m_latent
 # MEGATRON_LM_DIR='/capstor/scratch/cscs/gfu/frameworks/Megatron-LM-sai'
 
 # -- Training --
@@ -33,8 +33,8 @@ LR_WARMUP_TOKENS=2000000000 # 2B tokens
 
 # -- Checkpointing --
 LOAD_CKPT=true
-LOAD_EXP_NAME=moe_aelat_2b5_a440m-swiglu-md_decoupling-2n-4096sl-128gbsz-2mbsz-1e-3lr-1tp-1pp-1ep-1etp-1cp-mockrfalse-offfalse-dbgfalse-epoverlapfalse-fuguan-asymm-latent-729ca457-2026-07-02
-CHECKPOINT_STEPS=2000
+LOAD_EXP_NAME=moe_lt_2b5_a440m-swiglu-md_decoupling-2n-4096sl-128gbsz-2mbsz-1e-3lr-1tp-1pp-1ep-1etp-1cp-mockrfalse-offfalse-dbgfalse-epoverlapfalse-fuguan-asymm-latent-729ca457-2026-07-03
+CHECKPOINT_STEPS=4000
 
 # -- Parallelism --
 TP=1
@@ -42,6 +42,7 @@ ETP=1
 EP=1
 PP=1
 CP=1
+# VPP_LAYOUT="Ett\\|\\(tttttttt\\|\\)*2,ttL"
 
 # -- Attention / optimizer --
 ATTENTION_TYPE=gqa
@@ -65,8 +66,8 @@ RECOMPUTE_MODULES=""
 TOKENIZER_MODEL=$TOKENIZER_DIR/Apertus-8B-2509
 
 # -- Profiling --
-NSYS_PROFILER=true
-RANK_TO_PROFILE=4
+NSYS_PROFILER=false
+RANK_TO_PROFILE=16
 
 # Everything else uses the defaults in common/train.sh
 source $SCRIPTS_ROOT/common/train.sh
