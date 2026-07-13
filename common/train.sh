@@ -74,7 +74,8 @@ DATE=$(date +%Y-%m-%d)
 : "${LOG_NCCL:=false}"
 : "${NSYS_PROFILER:=false}"
 : "${TORCH_PROFILER:=false}"
-: "${RANK_TO_PROFILE:=0}"
+: "${RANK_TO_PROFILE:=0}"           # global rank(s) to profile, e.g. "0" or "0 32" (commas also ok)
+RANK_TO_PROFILE=${RANK_TO_PROFILE//,/ }
 : "${PROFILER_START_ITER:=15}"
 : "${PROFILER_END_ITER:=16}"
 : "${NSYS_PROFILER_START_ITER:=5}"
@@ -163,9 +164,11 @@ LOGGING_ARGS=(
 	--log-throughput
 	--log-progress
 	--tensorboard-dir $TENSORBOARD_DIR
-	--no-log-loss-scale-to-tensorboard
+	# --no-log-loss-scale-to-tensorboard
 	--log-memory-to-tensorboard
 	--log-timers-to-tensorboard
+	--log-params-norm
+	--moe-per-layer-logging
 	--log-memory-interval 100
 )
 
@@ -231,7 +234,9 @@ echo "[$(date)] Using codebase in $MEGATRON_LM_DIR  branch=$_MEG_BRANCH  commit=
 cd $MEGATRON_LM_DIR
 export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 
-# ---- UCCL flex/DeepEP dispatcher: build per-job + expose on PYTHONPATH -------
+# ---- UCCL flex/DeepEP dispatcher: shared build + expose on PYTHONPATH --------
+# Built once into UCCL_INSTALL_TARGET and reused by later jobs; set
+# RUN_UCCL_INSTALL=true to force a rebuild (see common/uccl.sh).
 # The wrapper's deep_ep must shadow the container's pre-installed stock deep_ep
 # (/opt/venv/.../deep_ep), otherwise Buffer() runs stock DeepEP's NVLink-P2P
 # check which fails on Alps GH200. Host PYTHONPATH does NOT reliably reach the
@@ -241,11 +246,8 @@ export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 UCCL_ENV_PREFIX=""
 if [ "$USE_UCCL" = true ]; then
 	source "$COMMON_DIR/uccl.sh"
-	if [ "$RUN_UCCL_INSTALL" = true ]; then
-		install_uccl
-	elif [ ! -d "$UCCL_INSTALL_TARGET" ]; then
-		echo "RUN_UCCL_INSTALL=false but UCCL_INSTALL_TARGET missing: $UCCL_INSTALL_TARGET" >&2
-		exit 1
+	if [ "$RUN_UCCL_INSTALL" = true ] || [ ! -d "$UCCL_INSTALL_TARGET" ]; then
+		install_uccl || { echo "UCCL install failed" >&2; exit 1; }
 	fi
 	export PYTHONPATH="$UCCL_PYTHONPATH:$PYTHONPATH"
 	UCCL_ENV_PREFIX="export PYTHONPATH=$UCCL_PYTHONPATH:\$PYTHONPATH;"
@@ -318,7 +320,7 @@ mkdir -p "$NSYS_DIR"
 NSYS_LAUNCHER=""
 if [ "$NSYS_PROFILER" = true ]; then
 	NSYS_LAUNCHER="nsys profile -s none --trace=nvtx,cudnn,cublas,cuda \
-		--output=${NSYS_DIR}/nsys-${MODEL_NAME}-${SLURM_JOB_ID}-rank${RANK_TO_PROFILE} \
+		--output=${NSYS_DIR}/nsys-${MODEL_NAME}-${SLURM_JOB_ID}-rank\$SLURM_PROCID \
 		--force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop"
 	TRAINING_CMD="$TRAINING_CMD --profile --profile-step-start $NSYS_PROFILER_START_ITER --profile-step-end $NSYS_PROFILER_END_ITER --profile-ranks $RANK_TO_PROFILE"
 fi
@@ -419,7 +421,7 @@ srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix \
     --environment=$IMAGE_ENV \
 	-lu bash -c "
 		LAUNCHER=''
-		if [ \"\$SLURM_PROCID\" -eq \"$RANK_TO_PROFILE\" ]; then
+		if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then
 			LAUNCHER=\"$NSYS_LAUNCHER\"
 		fi
 		$UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"

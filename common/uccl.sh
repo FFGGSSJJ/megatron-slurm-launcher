@@ -6,7 +6,9 @@
 # UCCL ships a drop-in `deep_ep` package + `uccl.ep`; Megatron's flex token
 # dispatcher (`--moe-token-dispatcher-type flex --moe-flex-dispatcher-backend
 # deepep`) does `from deep_ep import Buffer`, so all we must do is:
-#   1. build/install UCCL from source into a per-job dir (install_uccl), and
+#   1. build/install UCCL from source into a shared dir (install_uccl); train.sh
+#      only calls it when the dir is missing or RUN_UCCL_INSTALL=true, so jobs
+#      normally reuse the existing build instead of compiling every time, and
 #   2. prepend that dir to PYTHONPATH + export the CXI/libfabric transport env.
 #
 # The build MUST use the same container image as training (UCCL_CONTAINER_ENV_FILE
@@ -15,13 +17,14 @@
 # =============================================================================
 
 # ---- Knobs ------------------------------------------------------------------
-: "${RUN_UCCL_INSTALL:=true}"       # false → reuse an existing UCCL_INSTALL_TARGET
+: "${RUN_UCCL_INSTALL:=false}"      # true → force rebuild (otherwise built only if UCCL_INSTALL_TARGET is missing)
 : "${NUM_MAX_NVL_PEERS:=4}"         # NVLink peers per node (GH200: 4 GPUs/node)
 : "${UCCL_EP_TRANSPORT:=cxi}"       # Slingshot/CXI RDMA transport
 : "${UCCL_TORCH_CUDA_ARCH:=9.0}"    # GH200 = Hopper (sm_90)
 
-# Per-job source of truth: built fresh into UCCL_INSTALL_TARGET unless reused.
-: "${UCCL_INSTALL_TARGET:=$UCCL_INSTALL_BASE/${SLURM_JOB_ID:-manual}}"
+# Shared install dir, reused across jobs. Rebuild after changing the UCCL
+# source or the container image by setting RUN_UCCL_INSTALL=true once.
+: "${UCCL_INSTALL_TARGET:=$UCCL_INSTALL_BASE/default}"
 : "${UCCL_EP_DIR:=$UCCL_SOURCE_DIR/ep}"
 
 # ---- Runtime env ------------------------------------------------------------
@@ -33,6 +36,28 @@
 #   NUM_MAX_NVL_PEERS  compile-time -D flag consumed by install_uccl (harmless at runtime)
 #   UCCL_EP_TRANSPORT  selects UCCL's RDMA transport, read by the native uccl.ep lib
 export NUM_MAX_NVL_PEERS UCCL_EP_TRANSPORT
+
+# ---- Tuned dispatch/combine chunk configs ------------------------------------
+# UCCL_EP_{DISPATCH,COMBINE}_CONFIG is a DeepEP Config tuple:
+#   num_sms, nvl_chunked_send, nvl_chunked_recv, rdma_chunked_send, rdma_chunked_recv
+# Setdefault semantics: a value pre-set by the experiment script wins. EP sizes
+# without tuned values fall through to UCCL's built-in defaults. EP=16 was tuned
+# at 8k seq len, where the best dispatch config differs for BF16 vs FP8 dispatch.
+# if [ "$EP" -eq 32 ]; then
+# 	: "${UCCL_EP_DISPATCH_CONFIG:=24,8,512,8,512}"
+# 	: "${UCCL_EP_COMBINE_CONFIG:=24,1,512,8,512}"
+# elif [ "$EP" -eq 16 ]; then
+# 	if [ "$USE_FP8_DISPATCH" = true ]; then
+# 		: "${UCCL_EP_DISPATCH_CONFIG:=24,28,512,32,512}"
+# 	else
+# 		: "${UCCL_EP_DISPATCH_CONFIG:=24,8,512,16,512}"
+# 	fi
+# 	: "${UCCL_EP_COMBINE_CONFIG:=24,1,512,16,512}"
+# elif [ "$EP" -eq 8 ]; then
+# 	: "${UCCL_EP_DISPATCH_CONFIG:=24,12,512,32,512}"
+# 	: "${UCCL_EP_COMBINE_CONFIG:=24,2,512,24,512}"
+# fi
+# export UCCL_EP_DISPATCH_CONFIG UCCL_EP_COMBINE_CONFIG
 
 # Prepended to PYTHONPATH by train.sh: deep_ep wrapper first, then the uccl pkg.
 UCCL_PYTHONPATH="$UCCL_INSTALL_TARGET/deep_ep_wrapper_src:$UCCL_INSTALL_TARGET"

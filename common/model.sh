@@ -74,7 +74,6 @@ if [ "$USE_FP8" = true ]; then
 	MIXED_PRECISION_ARGS+=(
 		--fp8-format $FP8_FORMAT
 		--fp8-recipe $FP8_RECIPE
-		--fp8-param-gather
 	)
 fi
 
