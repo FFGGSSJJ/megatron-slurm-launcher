@@ -81,6 +81,26 @@ RANK_TO_PROFILE=${RANK_TO_PROFILE//,/ }
 : "${NSYS_PROFILER_START_ITER:=5}"
 : "${NSYS_PROFILER_END_ITER:=6}"
 
+# -- Dry run --
+# DRY_RUN=true assembles everything, prints the srun + training command and
+# exits without creating dirs, building UCCL, writing snapshots or launching.
+# Works outside an allocation too:  DRY_RUN=true bash launch/<exp>.sh
+: "${DRY_RUN:=false}"
+if [ "$DRY_RUN" = true ]; then
+	# The experiment's #SBATCH header wins over any inherited SLURM env (running
+	# the dry run inside a small salloc would otherwise misrepresent the real
+	# submission's node count); the rest gets GH200 defaults when unset.
+	# Snapshot the header now: $0 may be relative and train.sh cd's away later.
+	_SB_HEADER=$(grep '^#SBATCH' "$0" 2>/dev/null)
+	_SB_NODES=$(sed -n 's/^#SBATCH --nodes=//p' "$0" | head -1)
+	[ -n "$_SB_NODES" ] && SLURM_NNODES=$_SB_NODES
+	: "${SLURM_NNODES:=1}"
+	: "${SLURM_GPUS_PER_NODE:=4}"
+	: "${SLURM_CPUS_PER_TASK:=72}"
+	SLURM_NPROCS=$((SLURM_NNODES * SLURM_GPUS_PER_NODE))
+	: "${SLURM_JOB_ID:=dryrun}"
+fi
+
 # =============================================================================
 # DOMAIN CONFIGS
 # Order matters: engine.sh reads GBS/MBS/OPTIMIZER set by model.sh.
@@ -172,6 +192,12 @@ LOGGING_ARGS=(
 	--log-memory-interval 100
 )
 
+if [ "$LOG_PP_TIME" = true ]; then
+	LOGGING_ARGS+=(
+		--log-pp-stage-timing
+	)
+fi
+
 if [ "$LOAD_CKPT" = true ]; then
 	CHECKPOINTING_ARGS=(
 		--save $SAVE_CKPT_DIR
@@ -206,16 +232,18 @@ DATA_ARGS=(
 # =============================================================================
 # DIRECTORIES
 # =============================================================================
-mkdir -p $LOAD_CKPT_DIR
-mkdir -p $SAVE_CKPT_DIR
-mkdir -p $PROJECT_DIR
-mkdir -p $TRIGGER_DIR
-mkdir -p $DEBUG_DIR
-mkdir -p $LOGGING_DIR
+if [ "$DRY_RUN" != true ]; then
+	mkdir -p $LOAD_CKPT_DIR
+	mkdir -p $SAVE_CKPT_DIR
+	mkdir -p $PROJECT_DIR
+	mkdir -p $TRIGGER_DIR
+	mkdir -p $DEBUG_DIR
+	mkdir -p $LOGGING_DIR
+fi
 
 # Backup codebase
 if [ "$BACKUP_CODEBASE" == true ]; then
-  if [ -z "$(ls -A "$BACKUP_CODEBASE_DIR")" ]; then
+  if [ "$DRY_RUN" != true ] && [ -z "$(ls -A "$BACKUP_CODEBASE_DIR" 2>/dev/null)" ]; then
   	echo "[$(date)] Copying codebase in $MEGATRON_LM_DIR to $BACKUP_CODEBASE_DIR..."
   	rsync -av --exclude-from=$MEGATRON_LM_DIR/.gitignore $MEGATRON_LM_DIR/ $BACKUP_CODEBASE_DIR/ &> /dev/null
   fi
@@ -246,7 +274,7 @@ export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 UCCL_ENV_PREFIX=""
 if [ "$USE_UCCL" = true ]; then
 	source "$COMMON_DIR/uccl.sh"
-	if [ "$RUN_UCCL_INSTALL" = true ] || [ ! -d "$UCCL_INSTALL_TARGET" ]; then
+	if [ "$DRY_RUN" != true ] && { [ "$RUN_UCCL_INSTALL" = true ] || [ ! -d "$UCCL_INSTALL_TARGET" ]; }; then
 		install_uccl || { echo "UCCL install failed" >&2; exit 1; }
 	fi
 	export PYTHONPATH="$UCCL_PYTHONPATH:$PYTHONPATH"
@@ -288,7 +316,7 @@ export TRANSFORMERS_NO_SLOW_TOKENIZER=1
 
 if [ -n "$WANDB_API_KEY" ]; then
   echo "[$(date)] WANDB API key detected. Enabling WANDB logging."
-  if [ -d "$LOGGING_DIR/wandb/latest-run" ]; then
+  if [ "$DRY_RUN" != true ] && [ -d "$LOGGING_DIR/wandb/latest-run" ]; then
     echo "[$(date)] Syncing WANDB from previous run"
     wandb sync "$LOGGING_DIR/wandb/latest-run"
   fi
@@ -310,7 +338,7 @@ if [ "$LOG_NCCL" = true ]; then
 fi
 
 NSYS_DIR="$NSYS_LOG_DIR/$DATE/nsys/"
-mkdir -p "$NSYS_DIR"
+[ "$DRY_RUN" = true ] || mkdir -p "$NSYS_DIR"
 
 # NOTE: SLURM_PROCID is only defined inside the srun tasks, NOT in this batch
 # script. So the nsys wrapping is selected per-rank inside the `srun bash -c`
@@ -333,6 +361,7 @@ fi
 # COMPUTE ENVIRONMENT SNAPSHOT
 # =============================================================================
 # Save sbatch script (the thin experiment file) + the engine files + model env
+if [ "$DRY_RUN" != true ]; then   # whole snapshot writes files → skipped on dry run
 cp "$0" "$DEBUG_DIR"
 cp "$ENGINE_PATH" "$DEBUG_DIR"
 cp "$COMMON_DIR/model.sh" "$DEBUG_DIR"
@@ -388,10 +417,51 @@ echo -e "\n$(nvidia-smi)" >> $COMPUTE_ENVIRONMENT_DIR # CUDA Version & Driver
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\nEnvironment Variables:\n\n$(printenv)" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
+fi   # end DRY_RUN snapshot skip
 
 # =============================================================================
 # LAUNCH
 # =============================================================================
+# The launch command is built ONCE here: a normal run executes it, DRY_RUN
+# prints it. PER_RANK_CMD runs inside every task's container shell (it picks
+# the nsys LAUNCHER per rank, since SLURM_PROCID only exists inside the task).
+PER_RANK_CMD="LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
+SRUN_LAUNCH="srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix --distribution=block:block --network=disable_rdzv_get --environment=$IMAGE_ENV -lu"
+
+if [ "$DRY_RUN" = true ]; then
+	echo
+	echo "============================ DRY RUN ============================"
+	echo "# Everything below is a complete sbatch script: save it to a file and"
+	echo "# submit with \`sbatch <file>\`, or paste the exports + srun into an"
+	echo "# salloc shell of the same shape (the #SBATCH lines are ignored there)."
+	echo "#!/bin/bash"
+	echo "$_SB_HEADER"
+	echo
+	echo "export MASTER_ADDR=\$(scontrol show hostnames \$SLURM_JOB_NODELIST | head -n 1)"
+	echo "export MASTER_PORT=$MASTER_PORT WORLD_SIZE=\$((SLURM_NNODES * 4))"
+	echo "export OMP_NUM_THREADS=$OMP_NUM_THREADS CUDA_DEVICE_MAX_CONNECTIONS=1"
+	echo "export TORCH_NCCL_AVOID_RECORD_STREAMS=1 TORCH_NCCL_ASYNC_ERROR_HANDLING=1"
+	echo "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TRANSFORMERS_NO_SLOW_TOKENIZER=1"
+	[ -z "$WANDB_API_KEY" ] && echo "export WANDB_MODE=disabled"
+	if [ "$USE_UCCL" = true ]; then
+		echo "export NUM_MAX_NVL_PEERS=$NUM_MAX_NVL_PEERS UCCL_EP_TRANSPORT=$UCCL_EP_TRANSPORT${UCCL_EP_CPU_TIMEOUT_SECS:+ UCCL_EP_CPU_TIMEOUT_SECS=$UCCL_EP_CPU_TIMEOUT_SECS}"
+	fi
+	# Pretty-print: srun options one per line; the single-quoted bash -c body is
+	# split before each --arg into concatenated 'fragments' ("...'\" + newline +
+	# "' --..."), which the pasted shell glues back into ONE bash -c argument —
+	# so continuation lines of the body must start at column 0.
+	echo "srun --cpus-per-task $SLURM_CPUS_PER_TASK \\"
+	echo "    --mpi=pmix \\"
+	echo "    --distribution=block:block \\"
+	echo "    --network=disable_rdzv_get \\"
+	echo "    --environment=$IMAGE_ENV \\"
+	echo "    -lu bash -c \\"
+	printf "'%s'\n" "$(printf '%s' "$PER_RANK_CMD" | sed "s/'/'\\\\''/g")" | sed "s/ --/'\\\\\n' --/g"
+	echo "================================================================="
+	echo "DRY_RUN=true — nothing was created, built or launched."
+	exit 0
+fi
 # Per-rank local caches (compiled kernels) on node-local storage
 export LOCAL_CACHE_BASE=${SLURM_TMPDIR:-/tmp}/${SLURM_JOB_ID}
 export TRITON_CACHE_DIR=${LOCAL_CACHE_BASE}/triton_cache/${SLURM_PROCID}
@@ -415,16 +485,7 @@ if [ "$AUTO_JOB_REQUEUE" = true ]; then
 fi
 
 # export CUDA_LAUNCH_BLOCKING=1
-srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix \
-	--distribution=block:block \
-	--network=disable_rdzv_get \
-    --environment=$IMAGE_ENV \
-	-lu bash -c "
-		LAUNCHER=''
-		if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then
-			LAUNCHER=\"$NSYS_LAUNCHER\"
-		fi
-		$UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+$SRUN_LAUNCH bash -c "$PER_RANK_CMD"
 
 echo "END TIME: $(date)"
 

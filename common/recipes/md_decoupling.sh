@@ -24,6 +24,7 @@ REGULARIZATION_ARGS=(
 	--muon-momentum 0.95
 	--muon-use-nesterov
 	--hypersphere-scale-out-proj-init
+	--muon-tp-mode duplicated
 
 	--weight-decay 0.0
 	--adam-beta1 0.9

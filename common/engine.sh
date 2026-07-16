@@ -35,6 +35,10 @@
 : "${USE_FP8_DISPATCH:=false}"          # --moe-use-fp8-dispatch (knob defined; not wired yet)
 : "${USE_DETERMINISTIC_TRAINING:=false}"  # reproducibility: TE deterministic mode + env vars
 
+# -- Grad Accumulation Fusion --
+: "${NO_GRAD_ACC_FUSION:=false}"
+
+
 # -- Recompute --
 : "${RECOMPUTE_MODULES:=layernorm}"     # space-separated list, e.g. "layernorm mla_up_proj"
 
@@ -58,6 +62,7 @@ OPTIMIZATION_ARGS=(
 	--moe-grouped-gemm
 	--moe-permute-fusion # buggy with allgather
 	--moe-router-fusion
+	--enable-experimental
 )
 
 if [ "$TOKEN_DISPATCHER_TYPE" = flex ]; then
@@ -108,6 +113,12 @@ fi
 if [ "$USE_FP8_ACTIVATION" = true ]; then
 	OPTIMIZATION_ARGS+=(
 		--moe-use-fp8-activation
+	)
+fi
+
+if [ "$NO_GRAD_ACC_FUSION" = true ]; then
+	OPTIMIZATION_ARGS+=(
+		--no-gradient-accumulation-fusion
 	)
 fi
 
