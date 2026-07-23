@@ -27,8 +27,11 @@
 # -- Activation Function --
 : "${ACTIVATION_FUNCTION:=swiglu}"      # swiglu | pnglu
 
+# -- Normalization method --
+: "${NORMALIZATION:=pre-norm}"           # pre-norm | sandwich-norm
+
 # -- Attention --
-: "${ATTENTION_TYPE:=gqa}"              # gqa | mla
+: "${ATTENTION_TYPE:=gqa}"              # gqa | mla | kda | swa
 
 # -- Optimizer --
 : "${OPTIMIZER:=adam}"                  # adam | muon | dist_muon | md_decoupling
@@ -41,6 +44,9 @@
 : "${USE_FP8:=false}"                   # FP8 training (--fp8-format/--fp8-recipe/--fp8-param-gather)
 : "${FP8_FORMAT:=e4m3}"
 : "${FP8_RECIPE:=blockwise}"
+
+# -- MoE load balancing / routing --
+: "${LOAD_BALANCE_TYPE:=aux_loss}"          # aux_loss | quantile_balancing
 
 # -- MoE router (model side) --
 : "${USE_MOCK_ROUTER:=false}"
@@ -107,9 +113,21 @@ if [ "$ACTIVATION_FUNCTION" == "swiglu" ]; then
 	NETWORK_SIZE_ARGS+=(--swiglu)
 elif [ "$ACTIVATION_FUNCTION" == "pnglu" ]; then
 	NETWORK_SIZE_ARGS+=(--pnglu)
+elif [ "$ACTIVATION_FUNCTION" == "sssglu" ]; then
+	NETWORK_SIZE_ARGS+=(--sssglu)
 else
 	NETWORK_SIZE_ARGS+=(--swiglu)
 fi
+
+# Normalization method
+if [ "$NORMALIZATION" == "sandwich-norm" ]; then
+	NETWORK_SIZE_ARGS+=(--sandwich-norm)
+fi
+
+# Scaling of embeddings and residuals
+NETWORK_SIZE_ARGS+=(
+	--scale-embeddings-by-sqrt-hidden
+)
 
 # Attention type: GQA vs MLA. MLA_ARGS is empty for GQA so it expands to nothing.
 MLA_ARGS=()
@@ -129,6 +147,24 @@ if [ "$ATTENTION_TYPE" == "mla" ]; then
 
 		# --muon-split-mla-per-head
 	)
+elif [ "$ATTENTION_TYPE" == "kda" ]; then
+	NETWORK_SIZE_ARGS+=(
+		--experimental-attention-variant kda
+		--linear-attention-freq $LINEAR_ATTN_FREQ
+		--no-rope-freq 1
+		--linear-conv-kernel-dim $CONV_KERNEL_DIM
+		--linear-key-head-dim $LINEAR_KEY_HEAD_DIM
+		--linear-value-head-dim $LINEAR_VALUE_HEAD_DIM
+		--linear-num-key-heads $NUM_LINEAR_KEY_HEADS
+		--linear-num-value-heads $NUM_LINEAR_VALUE_HEADS
+	)
+elif [ "$ATTENTION_TYPE" == "swa" ]; then
+	NETWORK_SIZE_ARGS+=(
+		--window-size $WINDOW_SIZE
+		--window-attn-skip-freq $WINDOW_ATTN_SKIP_FREQ
+		--no-rope-freq $NO_ROPE_FREQ
+		--rotary-base $ROTARY_BASE
+	)
 else
 	NETWORK_SIZE_ARGS+=(
 		--group-query-attention
@@ -147,14 +183,24 @@ MOE_ARGS=(
 	--moe-router-dtype fp32
 
 	# Aux-loss-free load balancing (DeepSeek-V3 style)
-	--moe-router-load-balancing-type aux_loss
-	--moe-aux-loss-coeff 1e-2
-	# --moe-router-enable-expert-bias
-	# --moe-router-bias-update-rate 1e-3
+	--moe-router-load-balancing-type $LOAD_BALANCE_TYPE
 
 	# Expert Capacity factor
 	# --moe-expert-capacity-factor 1.1
 )
+
+if [ "$LOAD_BALANCE_TYPE" = "aux_loss" ]; then
+	MOE_ARGS+=(
+		--moe-aux-loss-coeff 1e-2
+	)
+fi
+
+if [ "$USE_EXPERT_BIAS" = true ]; then
+	MOE_ARGS+=(
+		--moe-router-enable-expert-bias
+		--moe-router-bias-update-rate 1e-3
+	)
+fi
 
 # Node-limited routing (expert grouping)
 if [ -n "$MOE_ROUTER_NUM_GROUPS" ]; then

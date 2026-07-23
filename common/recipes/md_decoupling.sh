@@ -18,17 +18,20 @@ REGULARIZATION_ARGS=(
 	--hypersphere-embedding-mode none
 	--hypersphere-router-mode row
 	--hypersphere-gains-mode rowcol
+	--residual-output-scaling
 	--gain-parametrization softplus
 	--md-router-use-orthogonal-updates True
 	--muon-scale-mode shape_up
 	--muon-momentum 0.95
 	--muon-use-nesterov
-	--hypersphere-scale-out-proj-init
+	# --hypersphere-scale-out-proj-init
 	--muon-tp-mode duplicated
 
 	--weight-decay 0.0
 	--adam-beta1 0.9
 	--adam-beta2 0.95
+	--attention-dropout 0.0
+    --hidden-dropout 0.0
 )
 
 # MuonMD uses linear LR decay (vs the WSD schedule in the adam/muon recipes) and
@@ -43,4 +46,4 @@ LEARNING_RATE_ARGS=(
 
 # MuonMD's parametrized/transformed optimizer state is not compatible with
 # the sharded torch_dist format; force the legacy torch format instead.
-CKPT_FORMAT=torch
+CKPT_FORMAT=torch_dist

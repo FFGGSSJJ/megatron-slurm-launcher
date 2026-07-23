@@ -61,8 +61,10 @@ OPTIMIZATION_ARGS=(
 	# Performance optimizations
 	--moe-grouped-gemm
 	--moe-permute-fusion # buggy with allgather
-	--moe-router-fusion
+	# --moe-router-fusion
 	--enable-experimental
+
+	--distributed-timeout-minutes 60
 )
 
 if [ "$TOKEN_DISPATCHER_TYPE" = flex ]; then

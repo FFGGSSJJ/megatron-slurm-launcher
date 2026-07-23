@@ -35,6 +35,13 @@
 : "${SLURM_LOG_DIR:=$SCRATCH_DIR/slurmlogs}"
 : "${NSYS_LOG_DIR:=$SCRATCH_DIR/slurmlogs}"
 
+# -- Triton kernel cache --
+# Keep this on a persistent path: it is the cache that stops Triton from
+# recompiling every kernel at every launch. train.sh puts one shared cache dir
+# underneath, used by all ranks. (Inductor and cpp_extension caches are NOT here
+# — train.sh keeps those on node-local /tmp, per job.)
+: "${JIT_CACHE_BASE:=/iopsstor/scratch/cscs/gfu/.cache}"
+
 # -- UCCL (MoE flex/DeepEP dispatcher; built once from source, then reused) --
 : "${UCCL_SOURCE_DIR:=/capstor/scratch/cscs/gfu/frameworks/uccl-sai}"  # uccl checkout (override to your own clone)
 : "${UCCL_INSTALL_BASE:=$SCRATCH_DIR/uccl_python}"       # shared install lands in $UCCL_INSTALL_BASE/default

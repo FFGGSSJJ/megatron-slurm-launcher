@@ -337,7 +337,7 @@ if [ "$LOG_NCCL" = true ]; then
   CMD_PREFIX="NCCL_DEBUG=INFO NCCL_DEBUG_FILE=$DEBUG_DIR/nccl-info-hostname-\$SLURMD_NODENAME-local-rank-\$SLURM_LOCALID-procid-\$SLURM_PROCID.txt $CMD_PREFIX"
 fi
 
-NSYS_DIR="$NSYS_LOG_DIR/$DATE/nsys/"
+NSYS_DIR="$NSYS_LOG_DIR/$DATE/nsys/$SLURM_JOB_ID"
 [ "$DRY_RUN" = true ] || mkdir -p "$NSYS_DIR"
 
 # NOTE: SLURM_PROCID is only defined inside the srun tasks, NOT in this batch
@@ -422,12 +422,40 @@ fi   # end DRY_RUN snapshot skip
 # =============================================================================
 # LAUNCH
 # =============================================================================
+# Only the Triton cache is persisted, in $JIT_CACHE_BASE (common/paths.sh;
+# override it in a launch script before sourcing this file), and SHARED by all
+# ranks: it writes via temp-file + atomic rename, so concurrent ranks are safe,
+# a kernel is compiled once instead of once per rank, and the cache stays valid
+# when the rank layout changes. That is what keeps kernels from recompiling at
+# every launch.
+#
+# Inductor and cpp_extension caches go to node-local /tmp, per job and per rank:
+# both guard writes with file locks that can stall when hundreds of ranks
+# contend on Lustre, so they are rebuilt per job rather than persisted.
+#
+# The bases expand here ($SLURM_JOB_ID is the same for every task), \$SLURM_PROCID
+# does NOT: in this batch script it is pinned to 0, so exporting it here would
+# hand every rank the same value (srun propagates our env).
+CACHE_ENV="export TRITON_HOME=$JIT_CACHE_BASE/.triton \
+TRITON_CACHE_DIR=$JIT_CACHE_BASE/.triton/cache \
+TORCHINDUCTOR_CACHE_DIR=/tmp/$SLURM_JOB_ID/.torch_inductor/\$SLURM_PROCID \
+TORCH_EXTENSIONS_DIR=/tmp/$SLURM_JOB_ID/.torch_ext/\$SLURM_PROCID; \
+mkdir -p \$TRITON_CACHE_DIR \$TORCHINDUCTOR_CACHE_DIR \$TORCH_EXTENSIONS_DIR;"
+
 # The launch command is built ONCE here: a normal run executes it, DRY_RUN
 # prints it. PER_RANK_CMD runs inside every task's container shell (it picks
 # the nsys LAUNCHER per rank, since SLURM_PROCID only exists inside the task).
-PER_RANK_CMD="LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+PER_RANK_CMD="$CACHE_ENV LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
 PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
-SRUN_LAUNCH="srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix --distribution=block:block --network=disable_rdzv_get --environment=$IMAGE_ENV -lu"
+# --wait 60 / --kill-on-bad-exit=1: once one task exits, give the rest 60s and
+# then tear the step down, so a single dead rank can't leave the others spinning
+# until the wall clock. NOTE the '=': --kill-on-bad-exit takes an OPTIONAL value,
+# so the space form ("--kill-on-bad-exit 1") makes srun treat 1 as the command to
+# exec ("execve(): 1: No such file or directory" on every rank). --wait takes a
+# required value, so the space form is correct there.
+# (--jobid is NOT passed: srun inherits the allocation from sbatch, and a literal
+# job id would break the pasteable DRY_RUN form below.)
+SRUN_LAUNCH="srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix --distribution=block:block --network=disable_rdzv_get --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
 
 if [ "$DRY_RUN" = true ]; then
 	echo
@@ -456,29 +484,16 @@ if [ "$DRY_RUN" = true ]; then
 	echo "    --distribution=block:block \\"
 	echo "    --network=disable_rdzv_get \\"
 	echo "    --environment=$IMAGE_ENV \\"
+	echo "    --wait 60 \\"
+	echo "    --kill-on-bad-exit=1 \\"
 	echo "    -lu bash -c \\"
 	printf "'%s'\n" "$(printf '%s' "$PER_RANK_CMD" | sed "s/'/'\\\\''/g")" | sed "s/ --/'\\\\\n' --/g"
 	echo "================================================================="
 	echo "DRY_RUN=true — nothing was created, built or launched."
 	exit 0
 fi
-# Per-rank local caches (compiled kernels) on node-local storage
-export LOCAL_CACHE_BASE=${SLURM_TMPDIR:-/tmp}/${SLURM_JOB_ID}
-export TRITON_CACHE_DIR=${LOCAL_CACHE_BASE}/triton_cache/${SLURM_PROCID}
-export TORCHINDUCTOR_CACHE_DIR=${LOCAL_CACHE_BASE}/inductor_cache/${SLURM_PROCID}
-mkdir -p "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
-
-# Per-rank torch extensions (compiled kernels) on node-local storage
-export TORCH_EXTENSIONS_DIR=${SLURM_TMPDIR:-/tmp}/torch_ext/$SLURM_JOB_ID
-mkdir -p "$TORCH_EXTENSIONS_DIR"
-
-SRUN_ARGS=" \
-	-lu \
-	--cpus-per-task $SLURM_CPUS_PER_TASK \
-	--wait 60 \
-	--jobid $SLURM_JOB_ID \
-	--kill-on-bad-exit 1 \
-	"
+# NOTE: per-rank Triton/inductor/torch-extension caches are set in $CACHE_ENV
+# above, inside PER_RANK_CMD — not here, where SLURM_PROCID is always 0.
 
 if [ "$AUTO_JOB_REQUEUE" = true ]; then
 	echo "[$(date)] $(sbatch --dependency=singleton $0)"
