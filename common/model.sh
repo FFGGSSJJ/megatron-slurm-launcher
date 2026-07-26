@@ -57,6 +57,48 @@
 : "${TOKENIZER_MODEL:=swiss-ai/Apertus-8B-2509}"
 : "${VOCAB_SIZE:=}"               # explicit vocab size (empty = derive from tokenizer)
 
+# -- Positional encoding / norm --
+# ROPE_BASE is the single source of truth for --rotary-base. The swa model envs
+# carry their own ROTARY_BASE (they train short-context with a small base), so it
+# seeds the default; an experiment assigning ROPE_BASE still wins over both.
+: "${MAX_POSITION_EMBEDDINGS:=32768}"
+if [ "$ATTENTION_TYPE" = "swa" ]; then : "${ROPE_BASE:=$ROTARY_BASE}"; fi
+: "${ROPE_BASE:=600000}"
+: "${USE_ROPE_SCALING:=true}"           # llama3-style rope scaling; changes rope frequencies
+: "${ROPE_SCALING_FACTOR:=2.5}"
+: "${NORM_EPSILON:=1e-6}"               # Megatron's own default is 1e-5
+: "${QK_LAYERNORM:=false}"              # --qk-layernorm
+
+# -- Attention head grouping --
+# The gqa branch below emits --group-query-attention itself. The swa/kda branches
+# do NOT, and without it Megatron ignores --num-query-groups entirely and falls
+# back to num_query_groups = num_attention_heads (full MHA). Set this true on a
+# swa/kda model that is meant to be GQA.
+: "${USE_GROUP_QUERY_ATTENTION:=false}"
+
+# -- MoE router (extra knobs) --
+: "${MOE_ROUTER_TOPK_SCALING_FACTOR:=}"  # empty = leave at Megatron's default (unset)
+: "${MOE_AUX_LOSS_COEFF:=}"              # empty = 1e-2 when LOAD_BALANCE_TYPE=aux_loss, else off
+: "${USE_EXPERT_BIAS:=false}"
+: "${EXPERT_BIAS_UPDATE_RATE:=1e-3}"
+
+# -- Schedule (iteration- vs sample-based) --
+# Setting TRAIN_SAMPLES switches the run to sample-based training: Megatron then
+# takes --train-samples instead of --train-iters, and the recipe's LR schedule
+# switches to --lr-warmup-samples/--lr-decay-samples. The two modes are mutually
+# exclusive in Megatron, so TRAINING_STEPS is simply unused in sample mode.
+: "${TRAIN_SAMPLES:=}"
+: "${LR_WARMUP_SAMPLES:=0}"
+: "${LR_DECAY_SAMPLES:=}"               # empty = Megatron defaults it to TRAIN_SAMPLES
+: "${EXIT_DURATION_MINS:=}"             # empty = no --exit-duration-in-mins
+: "${EVAL_INTERVAL:=1000000}"
+: "${MANUAL_GC_INTERVAL:=500}"
+: "${CHECK_NAN_IN_LOSS_AND_GRAD:=true}" # false = --no-check-for-nan-in-loss-and-grad
+
+# -- Initialization --
+: "${SEED:=28}"
+: "${INIT_METHOD_STD:=0.008944}"
+
 # ---- Derived (model-only) ---------------------------------------------------
 TOKENS_PER_ITER=$(echo "$GBS * $SEQ_LEN" | bc)
 TRAINING_STEPS=$(echo "scale=0; $TOTAL_TOKENS / $TOKENS_PER_ITER" | bc)
@@ -91,17 +133,29 @@ NETWORK_SIZE_ARGS=(
 	--num-attention-heads $NUM_ATTENTION_HEADS
 	--num-query-groups $NUM_QUERY_GROUPS
 
-	--max-position-embeddings 32768
+	--max-position-embeddings $MAX_POSITION_EMBEDDINGS
 	--position-embedding-type rope
-	--rotary-base 600000
-	--use-rope-scaling
-	--rope-scaling-factor 2.5
+	--rotary-base $ROPE_BASE
+)
+
+if [ "$USE_ROPE_SCALING" = true ]; then
+	NETWORK_SIZE_ARGS+=(
+		--use-rope-scaling
+		--rope-scaling-factor $ROPE_SCALING_FACTOR
+	)
+fi
+
+NETWORK_SIZE_ARGS+=(
 	--make-vocab-size-divisible-by 128
 	--normalization RMSNorm
-	--norm-epsilon 1e-6
+	--norm-epsilon $NORM_EPSILON
 	--untie-embeddings-and-output-weights
 	--attention-backend auto
 )
+
+if [ "$QK_LAYERNORM" = true ]; then
+	NETWORK_SIZE_ARGS+=(--qk-layernorm)
+fi
 
 # Explicit vocab size (otherwise derived from the tokenizer)
 if [ -n "$VOCAB_SIZE" ]; then
@@ -148,6 +202,9 @@ if [ "$ATTENTION_TYPE" == "mla" ]; then
 		# --muon-split-mla-per-head
 	)
 elif [ "$ATTENTION_TYPE" == "kda" ]; then
+	if [ "$USE_GROUP_QUERY_ATTENTION" = true ]; then
+		NETWORK_SIZE_ARGS+=(--group-query-attention)
+	fi
 	NETWORK_SIZE_ARGS+=(
 		--experimental-attention-variant kda
 		--linear-attention-freq $LINEAR_ATTN_FREQ
@@ -159,11 +216,13 @@ elif [ "$ATTENTION_TYPE" == "kda" ]; then
 		--linear-num-value-heads $NUM_LINEAR_VALUE_HEADS
 	)
 elif [ "$ATTENTION_TYPE" == "swa" ]; then
+	if [ "$USE_GROUP_QUERY_ATTENTION" = true ]; then
+		NETWORK_SIZE_ARGS+=(--group-query-attention)
+	fi
 	NETWORK_SIZE_ARGS+=(
 		--window-size $WINDOW_SIZE
 		--window-attn-skip-freq $WINDOW_ATTN_SKIP_FREQ
 		--no-rope-freq $NO_ROPE_FREQ
-		--rotary-base $ROTARY_BASE
 	)
 else
 	NETWORK_SIZE_ARGS+=(
@@ -189,16 +248,29 @@ MOE_ARGS=(
 	# --moe-expert-capacity-factor 1.1
 )
 
-if [ "$LOAD_BALANCE_TYPE" = "aux_loss" ]; then
+# An explicit MOE_AUX_LOSS_COEFF wins and applies to any balancing type (an aux
+# loss on top of quantile_balancing is a valid combination); otherwise aux_loss
+# keeps its 1e-2 default and the other types emit nothing.
+if [ -n "$MOE_AUX_LOSS_COEFF" ]; then
+	MOE_ARGS+=(
+		--moe-aux-loss-coeff $MOE_AUX_LOSS_COEFF
+	)
+elif [ "$LOAD_BALANCE_TYPE" = "aux_loss" ]; then
 	MOE_ARGS+=(
 		--moe-aux-loss-coeff 1e-2
+	)
+fi
+
+if [ -n "$MOE_ROUTER_TOPK_SCALING_FACTOR" ]; then
+	MOE_ARGS+=(
+		--moe-router-topk-scaling-factor $MOE_ROUTER_TOPK_SCALING_FACTOR
 	)
 fi
 
 if [ "$USE_EXPERT_BIAS" = true ]; then
 	MOE_ARGS+=(
 		--moe-router-enable-expert-bias
-		--moe-router-bias-update-rate 1e-3
+		--moe-router-bias-update-rate $EXPERT_BIAS_UPDATE_RATE
 	)
 fi
 
@@ -245,27 +317,39 @@ fi
 # recipe under common/recipes/. The knobs (OPTIMIZER, MUON_SCALE_MODE,
 # USE_NESTEROV, LR, LR_MIN, LR_WARMUP_ITERS) stay defined here; the recipe
 # consumes them and may set side effects like CKPT_FORMAT for MuonMD.
-# dist_muon reuses the muon recipe.
+# dist_muon reuses the muon recipe. RECIPE_FILE is exported so the compute
+# environment snapshot in train.sh can save the recipe that was actually used.
 case "$OPTIMIZER" in
 	adam)
-		source "$COMMON_DIR/recipes/adam.sh" ;;
+		RECIPE_FILE="$COMMON_DIR/recipes/adam.sh" ;;
 	muon|dist_muon)
-		source "$COMMON_DIR/recipes/muon.sh" ;;
+		RECIPE_FILE="$COMMON_DIR/recipes/muon.sh" ;;
 	md_decoupling)
-		source "$COMMON_DIR/recipes/md_decoupling.sh" ;;
+		RECIPE_FILE="$COMMON_DIR/recipes/md_decoupling.sh" ;;
 	*)
 		echo "Unknown OPTIMIZER: '$OPTIMIZER' (expected adam|muon|dist_muon|md_decoupling)" >&2
 		exit 1 ;;
 esac
+source "$RECIPE_FILE"
 
 TRAINING_ARGS=(
 	--micro-batch-size $MBS
 	--global-batch-size $GBS
-	# --no-check-for-nan-in-loss-and-grad
-	--train-iters $TRAINING_STEPS
+)
 
+if [ -n "$TRAIN_SAMPLES" ]; then
+	TRAINING_ARGS+=(--train-samples $TRAIN_SAMPLES)
+else
+	TRAINING_ARGS+=(--train-iters $TRAINING_STEPS)
+fi
+
+if [ "$CHECK_NAN_IN_LOSS_AND_GRAD" != true ]; then
+	TRAINING_ARGS+=(--no-check-for-nan-in-loss-and-grad)
+fi
+
+TRAINING_ARGS+=(
 	# Evaluation during training
-	--eval-interval 1000000	# disable
+	--eval-interval $EVAL_INTERVAL	# disable
 	--eval-iters 0
 
 	--log-interval 1
@@ -274,14 +358,18 @@ TRAINING_ARGS=(
 	--optimizer $OPTIMIZER
 	--dataloader-type single
 	--manual-gc
-	--manual-gc-interval 500
+	--manual-gc-interval $MANUAL_GC_INTERVAL
 	# --exit-signal-handler
 	# --trigger-path $TRIGGER_DIR
 )
 
+if [ -n "$EXIT_DURATION_MINS" ]; then
+	TRAINING_ARGS+=(--exit-duration-in-mins $EXIT_DURATION_MINS)
+fi
+
 INITIALIZATION_ARGS=(
-	--seed 28
-	--init-method-std 0.008944
+	--seed $SEED
+	--init-method-std $INIT_METHOD_STD
 )
 
 TOKENIZER_ARGS=(

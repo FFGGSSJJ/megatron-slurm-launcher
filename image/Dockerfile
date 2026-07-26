@@ -57,6 +57,14 @@ RUN set -eux; \
     python3 -c 'import uccl.ep, deep_ep; print(uccl.ep.__file__); print(deep_ep.Buffer)' \
         || echo 'WARNING: uccl.ep/deep_ep import failed in the build container (no GPU here); re-check on a compute node'
 
+# Selects UCCL's RDMA transport (ep/src/proxy.cpp: use_cxi_transport_ is true
+# only for the exact string "cxi"). Anything else takes the ibverbs path, which
+# on Slingshot finds no verbs device and aborts every rank with
+# "[FATAL] Selected RDMA NIC '' not found in verbs device list". common/uccl.sh
+# exports it too, but only when USE_UCCL=true — and this image makes deep_ep
+# importable regardless, so the default belongs here.
+ENV UCCL_EP_TRANSPORT=cxi
+
 
 RUN pip uninstall -y deep_gemm
 COPY ./deep_gemm-2.6.1+local-cp312-cp312-linux_aarch64.whl /tmp/

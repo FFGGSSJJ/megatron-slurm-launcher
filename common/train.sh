@@ -51,10 +51,90 @@ DATE=$(date +%Y-%m-%d)
 # left it unset, so an experiment overrides a knob by assigning it beforehand.
 # =============================================================================
 
+# -- Vocabulary --
+# The single switch for "which token id space is this run in". It picks BOTH the
+# tokenizer and the matching pre-tokenized corpus, because the two are only
+# meaningful together: shards are just token ids, so reading 200k ids through a
+# 130k vocab does not crash, it silently trains on nonsense.
+#
+#   130k  Apertus-8B-2509 (131,072 + 1,000 added) + climbmix   — the long-standing setup
+#   200k  apertus preliminary_mul_200k (200,064 + 124)         — ported from _research
+#
+: "${VOCAB:=130k}"                      # 130k | 200k
+# VOCAB_NOMINAL is the base vocab (excluding added tokens, matching the
+# convention in tools/flops_calculator.py) and is used ONLY for the model-size /
+# FLOPs summary. It is deliberately not fed to Megatron as --vocab-size: leaving
+# VOCAB_SIZE unset lets Megatron derive the true length from the tokenizer and
+# pad it itself.
+case "$VOCAB" in
+	130k) VOCAB_TOKENIZER=$TOKENIZER_DIR/Apertus-8B-2509
+	      VOCAB_NOMINAL=131072
+	      : "${DATASET_NAME:=climbmix}" ;;
+	200k) VOCAB_TOKENIZER=$TOKENIZER_DIR/apertus-mul-200k
+	      VOCAB_NOMINAL=200064
+	      : "${DATASET_NAME:=fineweb2hq-mul200k}" ;;
+	*)    echo "[$(date)] ERROR: VOCAB=$VOCAB — expected 130k or 200k" >&2; exit 1 ;;
+esac
+# Assigned, not `:=`-defaulted: every launch/*.sh pins TOKENIZER_MODEL outright
+# and is sourced BEFORE this file, so a default would never win and the switch
+# would silently do nothing. VOCAB owns the tokenizer; DATASET_NAME stays a
+# default above so you can still pick another corpus in the same id space
+# (e.g. VOCAB=200k DATASET_NAME=swissai-blend).
+TOKENIZER_MODEL=$VOCAB_TOKENIZER
+
 # -- Data --
-: "${DATASET_NAME:=climbmix}"           # climbmix | fineweb-edu-100B
+# climbmix | fineweb-edu-100B | fineweb2hq-mul200k | swissai-blend
 : "${MOCK_DATA:=false}"
 # (DATASET_CACHE_DIR comes from common/paths.sh)
+# Blend sources for the globbed presets. Set DATA_ROOT/DATA_SOURCES directly to
+# glob an arbitrary blend without adding a DATASET_NAME arm; whatever the preset
+# below would have filled in is then left alone.
+: "${DATA_ROOT:=}"
+: "${DATA_SOURCES:=}"
+# A pre-built blend file (tools/make_data_blend.py) handed straight to Megatron
+# as --data-args-path. Use it when the glob's token-proportional-over-everything
+# blend is not what you want: dropping subsets, reweighting them, or cutting the
+# shard count down for a smoke test. It wins over DATASET_NAME/DATA_SOURCES, so
+# no preset below fires and nothing gets globbed.
+# DATA_BLEND_VOCAB declares which id space the file's shards were tokenized in
+# (130k | 200k) so the vocab guard still applies; empty disables that check.
+: "${DATA_BLEND_FILE:=}"
+: "${DATA_BLEND_VOCAB:=}"
+if [ -n "$DATA_BLEND_FILE" ]; then
+	[ -f "$DATA_BLEND_FILE" ] || { echo "[$(date)] ERROR: DATA_BLEND_FILE not found: $DATA_BLEND_FILE" >&2; exit 1; }
+	DATASET_NAME=blend-file
+fi
+# A blend of thousands of shards overflows the srun command line (E2BIG,
+# "Argument list too long"). Above this many shards the list is written to a
+# file and passed via --data-args-path instead of argv; Megatron reads the same
+# token-proportional blend from the file.
+: "${DATA_ARGS_FILE_THRESHOLD:=256}"
+: "${NUM_WORKERS:=16}"
+# Cross-document attention handling. CROSS_DOC_ATTENTION=true emits the
+# --reset-position-ids/--reset-attention-mask/--eod-mask-loss trio.
+#
+# CREATE_ATTENTION_MASK=true (Megatron's default) makes the dataloader build a
+# dense [1, seq, seq] mask per sample -- at seq=8192 that is a 256 MB fp32 tril
+# reduced to a 64 MB bool, rebuilt for EVERY sample (the cache is disabled as
+# soon as any of the reset_*/eod_mask_loss switches is on) and copied to the GPU.
+# GPT layer specs pin attn_mask_type=causal, so TE's flash path never reads it.
+# Set false unless something in the model actually consumes an explicit mask.
+: "${CROSS_DOC_ATTENTION:=true}"
+: "${CREATE_ATTENTION_MASK:=true}"
+: "${PACKING_STRATEGY:=}"               # empty = Megatron default (greedy) | bfd
+
+# Which id space each corpus was tokenized in, so an incoherent
+# VOCAB/DATASET_NAME pair is caught below rather than trained on. Both globbed
+# blends are mul_200k (_research/lib/common.sh feeds every one of its blends
+# through that tokenizer); climbmix is Apertus-8B-2509 per its own comment.
+# fineweb-edu-100B is deliberately absent: it lives under a `llama_tokenized`
+# path, so it matches NEITHER vocab and is left unguarded as it was before.
+case "$DATASET_NAME" in
+	fineweb2hq-mul200k|swissai-blend) DATASET_VOCAB=200k ;;
+	climbmix)                         DATASET_VOCAB=130k ;;
+	blend-file)                       DATASET_VOCAB=$DATA_BLEND_VOCAB ;;
+	*)                                DATASET_VOCAB= ;;
+esac
 
 # -- Container / codebase --
 # (IMAGE_ENV and MEGATRON_LM_DIR come from common/paths.sh)
@@ -71,6 +151,7 @@ DATE=$(date +%Y-%m-%d)
 : "${CKPT_FORMAT:=torch_dist}"
 
 # -- Debugging / profiling --
+: "${TENSORBOARD_LOG_INTERVAL:=}"       # empty = Megatron default (1)
 : "${LOG_NCCL:=false}"
 : "${NSYS_PROFILER:=false}"
 : "${TORCH_PROFILER:=false}"
@@ -113,7 +194,7 @@ MODEL_STATS=""
 if command -v python3 >/dev/null 2>&1; then
 	MODEL_STATS="$(python3 "$SCRIPTS_ROOT/tools/flops_calculator.py" "$MODEL_ENV" \
 		--seq-len "$SEQ_LEN" --gbs "$GBS" --attention-type "$ATTENTION_TYPE" \
-		${VOCAB_SIZE:+--vocab-size "$VOCAB_SIZE"} 2>&1)" || \
+		--vocab-size "${VOCAB_SIZE:-$VOCAB_NOMINAL}" 2>&1)" || \
 		echo "[$(date)] flops_calculator failed (non-fatal)" >&2
 	echo "$MODEL_STATS"
 fi
@@ -132,6 +213,66 @@ if [ "$DATASET_NAME" == "climbmix" ]; then
 	do
 		DATASETS+="$DATASET_DIR/climbmix/hftokenized/part_${i}_text_document "
 	done
+fi
+
+# ---- Globbed blends (ported from Megatron-LM/_research) ---------------------
+# These name SOURCE DIRECTORIES rather than shard prefixes; the glob below turns
+# them into a flat prefix list. Each preset only fills what is still unset, so
+# DATA_ROOT/DATA_SOURCES from the experiment win.
+#
+# fineweb2hq-mul200k: fineweb-2-hq mmbert quality_10, SPP-annotated, mul_200k
+# tokenized (~716 shards). Only the fwedu split exists at this root — the dclm
+# split has no copy here, and the sibling *_apertus_v2 dir is empty (0 shards).
+if [ "$DATASET_NAME" == "fineweb2hq-mul200k" ]; then
+	: "${DATA_ROOT:=$FW2HQ_DIR}"
+	: "${DATA_SOURCES:=swissai-fineweb-2-hq-mmbert-full-quality_10-filterrobots-fwedu_spp_annotated}"
+fi
+
+# swissai-blend: the default swissai pretraining mixture (dclm-edu + fineweb-2
+# euro-high/euro-mid/other-high).
+if [ "$DATASET_NAME" == "swissai-blend" ]; then
+	: "${DATA_ROOT:=$SWISSAI_DATA_DIR}"
+	: "${DATA_SOURCES:=
+		swissai-dclm-edu-filterrobots_fine-merge
+		swissai-fineweb-2-quality_10-filterrobots-merge/euro-high
+		swissai-fineweb-2-quality_10-filterrobots-merge/euro-mid
+		swissai-fineweb-2-quality_10-filterrobots-merge/other-high
+	}"
+fi
+
+# Glob every {bin,idx} shard under each source dir (they may be nested, e.g.
+# dump-N/00000_tokens.*), strip the extension and hand Megatron the flat prefix
+# list. Blend weights are inferred from shard lengths, so the mixture stays
+# token-proportional across sources — do NOT add explicit weights here.
+DATA_SHARDS=()
+if [ -n "$DATA_SOURCES" ]; then
+	for src in $DATA_SOURCES; do
+		d="$DATA_ROOT/$src"
+		[ -d "$d" ] || { echo "[$(date)] ERROR: data source not found: $d" >&2; exit 1; }
+		while IFS= read -r p; do
+			DATA_SHARDS+=("$p")
+		done < <(find "$d" -type f \( -name '*.bin' -o -name '*.idx' \) \
+		             | sed -E 's/\.[^.]+$//' | sort -u)
+	done
+	[ "${#DATA_SHARDS[@]}" -gt 0 ] || { echo "[$(date)] ERROR: no .bin/.idx shards under $DATA_ROOT" >&2; exit 1; }
+	DATASETS="${DATA_SHARDS[*]}"
+	echo "[$(date)] DATASET: $DATASET_NAME — ${#DATA_SHARDS[@]} shards under $DATA_ROOT"
+	echo "[$(date)] TOKENIZER: $TOKENIZER_MODEL"
+fi
+
+# Vocab guard. VOCAB picks a coherent (tokenizer, corpus) pair on its own, so
+# this only fires when DATASET_NAME was pointed at a corpus from the OTHER id
+# space. That combination does not crash — it trains on nonsense for however
+# many node-hours you booked — so stop here instead.
+# ALLOW_TOKENIZER_MISMATCH=true if you really mean it.
+if [ -n "$DATASET_VOCAB" ] && [ "$DATASET_VOCAB" != "$VOCAB" ] \
+   && [ "${ALLOW_TOKENIZER_MISMATCH:-false}" != true ]; then
+	echo "[$(date)] ERROR: VOCAB=$VOCAB selects TOKENIZER_MODEL=$TOKENIZER_MODEL," >&2
+	echo "  but DATASET_NAME=$DATASET_NAME was tokenized in the $DATASET_VOCAB id space." >&2
+	echo "  Its token ids do not mean the same thing in this vocab and training will be" >&2
+	echo "  silently wrong. Use VOCAB=$DATASET_VOCAB, or pick a $VOCAB dataset, or set" >&2
+	echo "  ALLOW_TOKENIZER_MISMATCH=true to force it." >&2
+	exit 1
 fi
 
 # =============================================================================
@@ -192,6 +333,10 @@ LOGGING_ARGS=(
 	--log-memory-interval 100
 )
 
+if [ -n "$TENSORBOARD_LOG_INTERVAL" ]; then
+	LOGGING_ARGS+=(--tensorboard-log-interval $TENSORBOARD_LOG_INTERVAL)
+fi
+
 if [ "$LOG_PP_TIME" = true ]; then
 	LOGGING_ARGS+=(
 		--log-pp-stage-timing
@@ -219,10 +364,26 @@ fi
 DATA_ARGS=(
 	--split 100,0,0
 	--seq-length $SEQ_LEN
-	--reset-position-ids  # crossDocAttn
-	--reset-attention-mask  # crossDocAttn
-	--eod-mask-loss  # crossDocAttn
-	--num-workers 16
+)
+
+if [ "$CROSS_DOC_ATTENTION" = true ]; then
+	DATA_ARGS+=(
+		--reset-position-ids  # crossDocAttn
+		--reset-attention-mask  # crossDocAttn
+		--eod-mask-loss  # crossDocAttn
+	)
+fi
+
+if [ "$CREATE_ATTENTION_MASK" != true ]; then
+	DATA_ARGS+=(--no-create-attention-mask-in-dataloader)
+fi
+
+if [ -n "$PACKING_STRATEGY" ]; then
+	DATA_ARGS+=(--pretraining-packing-strategy $PACKING_STRATEGY)
+fi
+
+DATA_ARGS+=(
+	--num-workers $NUM_WORKERS
 	--num-dataset-builder-threads 1
 	# --goldfish-loss  # goldfish
 	# --goldfish-k 50  # goldfish
@@ -274,17 +435,32 @@ export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 UCCL_ENV_PREFIX=""
 if [ "$USE_UCCL" = true ]; then
 	source "$COMMON_DIR/uccl.sh"
-	if [ "$DRY_RUN" != true ] && { [ "$RUN_UCCL_INSTALL" = true ] || [ ! -d "$UCCL_INSTALL_TARGET" ]; }; then
-		install_uccl || { echo "UCCL install failed" >&2; exit 1; }
-	fi
-	export PYTHONPATH="$UCCL_PYTHONPATH:$PYTHONPATH"
-	UCCL_ENV_PREFIX="export PYTHONPATH=$UCCL_PYTHONPATH:\$PYTHONPATH;"
-	echo "[$(date)] UCCL on PYTHONPATH: $UCCL_PYTHONPATH"
+	# if [ "$DRY_RUN" != true ] && { [ "$RUN_UCCL_INSTALL" = true ] || [ ! -d "$UCCL_INSTALL_TARGET" ]; }; then
+	# 	install_uccl || { echo "UCCL install failed" >&2; exit 1; }
+	# fi
+	# export PYTHONPATH="$UCCL_PYTHONPATH:$PYTHONPATH"
+	# UCCL_ENV_PREFIX="export PYTHONPATH=$UCCL_PYTHONPATH:\$PYTHONPATH;"
+	# echo "[$(date)] UCCL on PYTHONPATH: $UCCL_PYTHONPATH"
 fi
 
 # Data Args
 if [ "$MOCK_DATA" = true ]; then
   DATA_ARGS="${DATA_ARGS[@]} --mock-data"
+elif [ -n "$DATA_BLEND_FILE" ]; then
+  # Already a Megatron blend list (optionally weighted); hand it over untouched.
+  echo "[$(date)] DATASET: pre-built blend -> --data-args-path $DATA_BLEND_FILE"
+  DATA_ARGS="${DATA_ARGS[@]} --data-args-path $DATA_BLEND_FILE --data-cache-path $DATASET_CACHE_DIR"
+elif [ "${#DATA_SHARDS[@]}" -gt "$DATA_ARGS_FILE_THRESHOLD" ]; then
+  # Too many shards to fit on the command line: hand Megatron a file instead.
+  # --data-args-path is mutually exclusive with --data-path (arguments.py), so
+  # this replaces it rather than adding to it. Same blend either way.
+  DATA_ARGS_FILE="$DATASET_CACHE_DIR/train_data_paths-${SLURM_JOB_ID:-local}.txt"
+  if [ "$DRY_RUN" != true ]; then
+    mkdir -p "$DATASET_CACHE_DIR"
+    printf '%s\n' "${DATA_SHARDS[@]}" > "$DATA_ARGS_FILE"
+  fi
+  echo "[$(date)] DATASET: ${#DATA_SHARDS[@]} shards > $DATA_ARGS_FILE_THRESHOLD -> --data-args-path $DATA_ARGS_FILE"
+  DATA_ARGS="${DATA_ARGS[@]} --data-args-path $DATA_ARGS_FILE --data-cache-path $DATASET_CACHE_DIR"
 else
   DATA_ARGS="${DATA_ARGS[@]} --data-path $DATASETS --data-cache-path $DATASET_CACHE_DIR"
 fi
@@ -364,8 +540,10 @@ fi
 if [ "$DRY_RUN" != true ]; then   # whole snapshot writes files → skipped on dry run
 cp "$0" "$DEBUG_DIR"
 cp "$ENGINE_PATH" "$DEBUG_DIR"
+cp "$COMMON_DIR/paths.sh" "$DEBUG_DIR"
 cp "$COMMON_DIR/model.sh" "$DEBUG_DIR"
 cp "$COMMON_DIR/engine.sh" "$DEBUG_DIR"
+cp "$RECIPE_FILE" "$DEBUG_DIR"          # optimizer recipe picked by $OPTIMIZER
 [ "$USE_UCCL" = true ] && cp "$COMMON_DIR/uccl.sh" "$DEBUG_DIR"
 cp "$MODEL_ENV_FILE" "$DEBUG_DIR"
 
@@ -393,8 +571,8 @@ echo -e "\nExperiment file: $0\n" >> $COMPUTE_ENVIRONMENT_DIR
 cat $0 >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
-echo -e "\nEngine files: $ENGINE_PATH , model.sh , engine.sh\n" >> $COMPUTE_ENVIRONMENT_DIR
-cat "$ENGINE_PATH" "$COMMON_DIR/model.sh" "$COMMON_DIR/engine.sh" >> $COMPUTE_ENVIRONMENT_DIR
+echo -e "\nEngine files: $ENGINE_PATH , paths.sh , model.sh , engine.sh , $RECIPE_FILE\n" >> $COMPUTE_ENVIRONMENT_DIR
+cat "$ENGINE_PATH" "$COMMON_DIR/paths.sh" "$COMMON_DIR/model.sh" "$COMMON_DIR/engine.sh" "$RECIPE_FILE" >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\nTOML file: $SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment\n" >> $COMPUTE_ENVIRONMENT_DIR

@@ -26,6 +26,13 @@
 : "${DATASET_DIR:=/iopsstor/scratch/cscs/gfu/datasets}"
 : "${DATASET_CACHE_DIR:=$SCRATCH_DIR/datasets/cache}"
 : "${FINEWEB_DIR:=/iopsstor/scratch/cscs/anowak/datasets/megatron/llama_tokenized/fineweb-edu-100B}"
+# fineweb-2-hq mmbert quality_10, SPP-annotated, tokenized with the apertus
+# preliminary_mul_200k tokenizer. Source dirs hold nested {bin,idx} shards and
+# are globbed by DATASET_NAME=fineweb2hq-mul200k in common/train.sh. Relocated
+# here 2026-07-02; the old capstor datasets_tokenized path is gone.
+: "${FW2HQ_DIR:=/iopsstor/scratch/cscs/ahuang/fwedu}"
+# The swissai pretraining blend (dclm-edu + fineweb-2 euro/other splits).
+: "${SWISSAI_DATA_DIR:=/iopsstor/scratch/cscs/jpcoles/a06}"
 
 # -- Tokenizer --
 : "${TOKENIZER_DIR:=/iopsstor/scratch/cscs/gfu/datasets/tokenizers}"

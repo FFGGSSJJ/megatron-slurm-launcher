@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --account=infra01
-#SBATCH --time=6:00:00
+#SBATCH --time=1:00:00
 #SBATCH --job-name=moe_110b+_test
 #SBATCH --nodes=64
 #SBATCH --ntasks-per-node=4
@@ -21,10 +21,13 @@ PROJECT_NAME=chonk_correctness
 # Overridable (so launch/performance/moe_110b+_sweep.sh can set it per run).
 : "${MODEL_ENV:=chonk/chonk_swa_H3584_h2048_lt1792}"
 
+# -- Dataset and tokenizer --
+VOCAB=200k
+
 # -- Training --
 MBS=1
-GBS=1024
-LR=0.001
+GBS=4096
+LR=0.006
 LR_MIN=0.0001
 SEQ_LEN=8192
 
@@ -34,9 +37,9 @@ LOAD_EXP_NAME="fp8moe-chonk_swa_H3584_h2048_lt1792-sssglu-md_decoupling-64n-8192
 CHECKPOINT_STEPS=250
 
 # -- Parallelism --
-# TP=2
+# TP=1
 # ETP=1
-# EP=32
+# EP=16
 # PP=8
 # CP=1
 # VPP_LAYOUT="E\\|\\(ttt\\|\\)*14,L"
@@ -46,7 +49,7 @@ ETP=1
 EP=32
 PP=4
 CP=1
-VPP_LAYOUT="Etttt\\|\\(tttttt\\|\\)*2,\\(ttttt\\|\\)*2,\\(tttttt\\|\\)*2,ttttL"
+VPP_LAYOUT="Ettt\\|\\(tttttt\\|\\)*2,\\(ttttt\\|\\)*2,\\(tttttt\\|\\)*2,tttttL"
 
 # -- Optimizer --
 OPTIMIZER=md_decoupling
@@ -60,7 +63,7 @@ USE_MOCK_ROUTER=false
 LOAD_BALANCE_TYPE=quantile_balancing
 
 # -- MoE offloading --
-USE_MOE_OFFLOADING=false
+USE_MOE_OFFLOADING=true
 if [ "$USE_MOE_OFFLOADING" = true ]; then
     USE_FP8_DISPATCH=true
 	USE_EXPERTS_OFFLOADING=true
@@ -74,9 +77,8 @@ fi
 # -- UCCL --
 USE_UCCL=true
 
-# -- Recompute / tokenizer --
-RECOMPUTE_MODULES="layernorm moe_act"
-TOKENIZER_MODEL=$TOKENIZER_DIR/Apertus-8B-2509
+# -- Recompute --
+RECOMPUTE_MODULES="layernorm"
 
 # -- Profiling --
 NSYS_PROFILER=true

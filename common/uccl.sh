@@ -41,26 +41,38 @@ export NUM_MAX_NVL_PEERS UCCL_EP_TRANSPORT
 # UCCL_EP_{DISPATCH,COMBINE}_CONFIG is a DeepEP Config tuple:
 #   num_sms, nvl_chunked_send, nvl_chunked_recv, rdma_chunked_send, rdma_chunked_recv
 # Setdefault semantics: a value pre-set by the experiment script wins. EP sizes
-# without tuned values fall through to UCCL's built-in defaults. EP=16 was tuned
-# at 8k seq len, where the best dispatch config differs for BF16 vs FP8 dispatch.
-# if [ "$EP" -eq 32 ]; then
-# 	: "${UCCL_EP_DISPATCH_CONFIG:=24,8,512,8,512}"
-# 	: "${UCCL_EP_COMBINE_CONFIG:=24,1,512,8,512}"
-# elif [ "$EP" -eq 16 ]; then
-# 	if [ "$USE_FP8_DISPATCH" = true ]; then
-# 		: "${UCCL_EP_DISPATCH_CONFIG:=24,28,512,32,512}"
-# 	else
-# 		: "${UCCL_EP_DISPATCH_CONFIG:=24,8,512,16,512}"
-# 	fi
-# 	: "${UCCL_EP_COMBINE_CONFIG:=24,1,512,16,512}"
-# elif [ "$EP" -eq 8 ]; then
-# 	: "${UCCL_EP_DISPATCH_CONFIG:=24,12,512,32,512}"
-# 	: "${UCCL_EP_COMBINE_CONFIG:=24,2,512,24,512}"
-# fi
-# export UCCL_EP_DISPATCH_CONFIG UCCL_EP_COMBINE_CONFIG
+# without tuned values fall through to UCCL's built-in defaults.
+#
+# EP=16/32 come from latent_moe_8x256_uccl_config_catalog.json
+if [ "$EP" -eq 32 ]; then
+	if [ "$USE_FP8_DISPATCH" = true ]; then
+		: "${UCCL_EP_DISPATCH_CONFIG:=24,40,512,32,512}"
+	else
+		: "${UCCL_EP_DISPATCH_CONFIG:=24,44,512,32,512}"
+	fi
+	: "${UCCL_EP_COMBINE_CONFIG:=24,5,512,32,512}"
+fi
+
+if [ "$EP" -eq 16 ]; then
+	if [ "$USE_FP8_DISPATCH" = true ]; then
+		: "${UCCL_EP_DISPATCH_CONFIG:=24,40,512,32,512}"
+	else
+		: "${UCCL_EP_DISPATCH_CONFIG:=24,32,512,32,512}"
+	fi
+	: "${UCCL_EP_COMBINE_CONFIG:=24,7,512,32,512}"
+fi
+
+if [ "$EP" -eq 8 ]; then
+	: "${UCCL_EP_DISPATCH_CONFIG:=24,12,512,32,512}"
+	: "${UCCL_EP_COMBINE_CONFIG:=24,2,512,24,512}"
+fi
+export UCCL_EP_DISPATCH_CONFIG UCCL_EP_COMBINE_CONFIG
 
 # Prepended to PYTHONPATH by train.sh: deep_ep wrapper first, then the uccl pkg.
 UCCL_PYTHONPATH="$UCCL_INSTALL_TARGET/deep_ep_wrapper_src:$UCCL_INSTALL_TARGET"
+
+# Setup timeout
+export UCCL_EP_CPU_TIMEOUT_SECS=6000
 
 # ---- Build/install UCCL-EP into $UCCL_INSTALL_TARGET (one 1-node srun step) --
 # Runs inside the current allocation (no --account/--reservation needed); the

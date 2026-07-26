@@ -8,8 +8,14 @@ kv-channels default), MLA ranks, attention type (gqa), SEQ_LEN (4096),
 GBS (1024). Vocab defaults to the Apertus-8B tokenizer size; the performance
 launch scripts override it to 335232, pass --vocab-size to match a run.
 
+Sliding-window attention (ATTENTION_TYPE=swa) has exactly the same projections
+as GQA, so params match; the attention score/context term is counted at full
+sequence length, i.e. an upper bound that ignores WINDOW_SIZE and
+WINDOW_ATTN_SKIP_FREQ.
+
 Examples:
     tools/flops_calculator.py moe_117b_a8b_latent
+    tools/flops_calculator.py chonk/chonk_swa_H3584_h2048_lt1792
     tools/flops_calculator.py moe_2b/moe_lt4_se_2b5_a440m moe_2b/moe_alt_se_2b5_a440m
     tools/flops_calculator.py moe_670b_a37b --attention-type mla --seq-len 8192 --gbs 2048
 """
@@ -20,6 +26,11 @@ import re
 import sys
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "models")
+
+# swa keeps GQA's projections, so it shares the GQA params/FLOPs path.
+# kda is deliberately absent: linear-attention layers are a different shape.
+ATTENTION_TYPES = ("gqa", "swa", "mla")
+GQA_LIKE = ("gqa", "swa")
 
 # MLA hyperparameters are hardcoded in common/model.sh, not in the model envs
 MLA_DEFAULTS = {
@@ -70,12 +81,25 @@ def parse_moe_layer_freq(value, num_layers):
     return pattern
 
 
+def parse_window_size(value):
+    """WINDOW_SIZE is a Megatron --window-size tuple, e.g. (1024,0) = 1024 tokens
+    of left context. Display only; returns the left window or None."""
+    if not value:
+        return None
+    m = re.search(r"-?\d+", value)
+    return int(m.group()) if m else None
+
+
 def build_config(env, args):
     hidden_size = int(env["HIDDEN_SIZE"])
     num_layers = int(env["NUM_LAYERS"])
     num_heads = int(env["NUM_ATTENTION_HEADS"])
     pattern = parse_moe_layer_freq(env.get("MOE_LAYER_FREQ"), num_layers)
     shared_ffn = int(env.get("MOE_SHARED_FFN_HIDDEN_SIZE") or 0)
+    attention_type = args.attention_type or env.get("ATTENTION_TYPE", "gqa")
+    if attention_type not in ATTENTION_TYPES:
+        sys.exit(f"Unsupported ATTENTION_TYPE {attention_type!r} "
+                 f"(supported: {', '.join(ATTENTION_TYPES)}); pass --attention-type to override")
 
     def latent(key):
         # empty/absent means "no latent" in common/model.sh -> stays on hidden
@@ -102,7 +126,8 @@ def build_config(env, args):
         "num_moe_layers": sum(1 for x in pattern if x),
         "num_dense_layers": sum(1 for x in pattern if not x),
         # ATTENTION_TYPE is set by the launch script, not the model env
-        "attention_type": args.attention_type or env.get("ATTENTION_TYPE", "gqa"),
+        "attention_type": attention_type,
+        "window_size": parse_window_size(env.get("WINDOW_SIZE")) if attention_type == "swa" else None,
         "vocab_size": args.vocab_size,
         "sequence_length": args.seq_len,
         "gbs": args.gbs,
@@ -173,7 +198,8 @@ def calculate_flops(config):
 
         model_flops += layer_num * (q_proj + kv_down_proj + kv_up_proj + attn + output_proj)
     else:
-        # GQA (Grouped Query Attention) - standard
+        # GQA (Grouped Query Attention) - standard. swa shares this path: same
+        # projections, and the attn term stays at full seq_len (upper bound).
         q_proj = 2 * token_num * hidden_size * (num_query_heads * head_dim)
         kv_proj = 2 * (2 * token_num * hidden_size * (num_key_value_heads * head_dim))
         attn = 2 * gbs * seq_len * (num_query_heads * head_dim) * seq_len
@@ -292,7 +318,7 @@ def calculate_model_size(config):
 
         attn_params_per_layer = q_params + kv_down_params + kv_up_params + o_params
     else:
-        # GQA (Grouped Query Attention)
+        # GQA (Grouped Query Attention); swa is identical parameter-wise
         q_params = hidden_size * (num_query_heads * head_dim)
         k_params = hidden_size * (num_key_value_heads * head_dim)
         v_params = hidden_size * (num_key_value_heads * head_dim)
@@ -419,16 +445,20 @@ def main():
     parser.add_argument("--gbs", type=int, default=1024, help="global batch size (default: %(default)s, per common/model.sh)")
     parser.add_argument("--vocab-size", type=int, default=131072,
                         help="vocab size (default: %(default)s ~ Apertus-8B tokenizer; performance launches use 335232)")
-    parser.add_argument("--attention-type", choices=["gqa", "mla"], default=None,
-                        help="override attention type (default: env file's ATTENTION_TYPE or gqa)")
+    parser.add_argument("--attention-type", choices=list(ATTENTION_TYPES), default=None,
+                        help="override attention type (default: env file's ATTENTION_TYPE or gqa); "
+                             "swa is counted as gqa with full-length attention")
     args = parser.parse_args()
 
     for name in args.models:
         env_file = resolve_model_env(name)
         config = build_config(parse_model_env(env_file), args)
         env_label = os.path.relpath(env_file, os.path.dirname(MODELS_DIR))
+        attn_label = config["attention_type"]
+        if config["window_size"]:
+            attn_label += f" (window={config['window_size']}, counted as full attention)"
         print(f"== {config['model_name']} ({env_label}) | "
-              f"{config['attention_type']} | seq_len={config['sequence_length']} "
+              f"{attn_label} | seq_len={config['sequence_length']} "
               f"gbs={config['gbs']} vocab={config['vocab_size']} | "
               f"{config['num_dense_layers']} dense + {config['num_moe_layers']} moe layers ==")
         calculate_model_size(config)

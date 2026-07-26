@@ -42,6 +42,12 @@
 # -- Recompute --
 : "${RECOMPUTE_MODULES:=layernorm}"     # space-separated list, e.g. "layernorm mla_up_proj"
 
+# -- Misc --
+: "${DISTRIBUTED_TIMEOUT_MINUTES:=60}"
+# Megatron force-disables sequence parallelism at TP=1 (with a warning), so this
+# is a no-op there; set false to keep the flag off the command line entirely.
+: "${SEQUENCE_PARALLEL:=false}"
+
 # ---- Derived (parallelism) --------------------------------------------------
 DP=$(echo "$SLURM_NNODES * 4 / $TP / $PP / $CP" | bc)
 GA=$(echo "$GBS / $MBS / $DP" | bc)
@@ -64,7 +70,7 @@ OPTIMIZATION_ARGS=(
 	# --moe-router-fusion
 	--enable-experimental
 
-	--distributed-timeout-minutes 60
+	--distributed-timeout-minutes $DISTRIBUTED_TIMEOUT_MINUTES
 )
 
 if [ "$TOKEN_DISPATCHER_TYPE" = flex ]; then
@@ -136,9 +142,12 @@ DISTRIBUTED_ARGS=(
 	--expert-tensor-parallel-size $ETP
 	--expert-model-parallel-size $EP
 	--context-parallel-size $CP
-	--sequence-parallel
 	# --tp-comm-overlap  # Requires TE > 2.8
 )
+
+if [ "$SEQUENCE_PARALLEL" = true ]; then
+	DISTRIBUTED_ARGS+=(--sequence-parallel)
+fi
 
 if [ -n "$VPP_LAYOUT" ]; then
 	DISTRIBUTED_ARGS+=(
