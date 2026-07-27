@@ -245,7 +245,7 @@ fi
 # list. Blend weights are inferred from shard lengths, so the mixture stays
 # token-proportional across sources — do NOT add explicit weights here.
 DATA_SHARDS=()
-if [ -n "$DATA_SOURCES" ]; then
+if [ -n "$DATA_SOURCES" ] && [ -z "$DATA_BLEND_FILE" ]; then
 	for src in $DATA_SOURCES; do
 		d="$DATA_ROOT/$src"
 		[ -d "$d" ] || { echo "[$(date)] ERROR: data source not found: $d" >&2; exit 1; }
@@ -623,7 +623,14 @@ mkdir -p \$TRITON_CACHE_DIR \$TORCHINDUCTOR_CACHE_DIR \$TORCH_EXTENSIONS_DIR;"
 # The launch command is built ONCE here: a normal run executes it, DRY_RUN
 # prints it. PER_RANK_CMD runs inside every task's container shell (it picks
 # the nsys LAUNCHER per rank, since SLURM_PROCID only exists inside the task).
-PER_RANK_CMD="$CACHE_ENV LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+#
+# The RANKMAP line records this run's own rank -> host mapping in the .out log.
+# Everything downstream that reasons about placement (which ranks share a node,
+# which EP group straddles a dragonfly-group boundary -- see
+# tools/ep_cross_group_ranks.py) derives ranks from the allocation order; this
+# makes each run carry the ground truth so a trace can be checked instead of
+# trusted. grep RANKMAP on the .out to recover it.
+PER_RANK_CMD="$CACHE_ENV echo RANKMAP \$SLURM_PROCID \$SLURMD_NODENAME; LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
 PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
 # --wait 60 / --kill-on-bad-exit=1: once one task exits, give the rest 60s and
 # then tear the step down, so a single dead rank can't leave the others spinning
