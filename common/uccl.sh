@@ -44,6 +44,8 @@ export NUM_MAX_NVL_PEERS UCCL_EP_TRANSPORT
 # without tuned values fall through to UCCL's built-in defaults.
 #
 # EP=16/32 come from latent_moe_8x256_uccl_config_catalog.json
+: "${UCCL_EP_DISPATCH_CONFIG:=24,12,512,32,512}"
+: "${UCCL_EP_COMBINE_CONFIG:=24,2,512,24,512}"
 if [ "$EP" -eq 32 ]; then
 	if [ "$USE_FP8_DISPATCH" = true ]; then
 		: "${UCCL_EP_DISPATCH_CONFIG:=24,40,512,32,512}"
