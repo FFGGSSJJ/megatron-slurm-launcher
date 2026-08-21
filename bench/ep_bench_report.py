@@ -9,6 +9,11 @@ iteration samples), not the stdout log, so the averages come from every sample.
     bench/ep_bench_report.py --ep 16            # only the EP16 runs
     bench/ep_bench_report.py --csv docs/ep-bench.csv
 
+Machine mode for the pre-flight auto-exclude loop (nodes to drop on stdout,
+one per line; reasoning on stderr):
+
+    bench/ep_bench_report.py --pick-culprits --bench-json logs/ep-bench-2n/ep-dispatch-<job>.json
+
 Each EP size gets its own section and its own median, since an EP16 run spans 4
 nodes and an EP32 run 8: pooling them would flag every run of the slower size.
 
@@ -27,6 +32,15 @@ import sys
 # Same threshold as tools/ep_slow_nodes.py and the benchmark itself.
 SLOW = 1.1
 MIN_RUNS = 5  # below this an EP size has no usable median; say so rather than imply clean
+# --pick-culprits defaults. FLAG is deliberately far above SLOW: a mildly
+# elevated group is not a training problem (3144698 ran +12% and +30% groups on
+# the side whose training rtt was perfectly clean), so the loop must only act
+# on the unambiguous ~2x case.
+FLAG_RATIO = 1.5  # a group flags above this multiple of the median group
+# 1.3, not 1.5: the same nid007260 signature measured 1.70x spread one run and
+# 1.46x the next -- 1.5 would flip that weaker reading to whole-group blame.
+SPREAD = 1.3
+MIN_GROUPS = 4    # below this the median group is not a baseline; blame no one
 HERE = pathlib.Path(__file__).resolve().parent
 # One dir per backend: pooling a NCCL latency with a UCCL one distorts the median.
 DEFAULT_DIR = HERE / "logs/ep-bench-2n-nccl"
@@ -40,6 +54,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ep", type=int, default=None,
                    help="only this EP size (default: every size, each in its own section)")
     p.add_argument("--csv", type=pathlib.Path, default=None)
+    p.add_argument("--pick-culprits", action="store_true",
+                   help="machine mode: exclude candidates for ONE run, not a summary")
+    p.add_argument("--bench-json", type=pathlib.Path, default=None,
+                   help="the run to analyse in --pick-culprits mode")
+    p.add_argument("--flag-ratio", type=float, default=FLAG_RATIO,
+                   help=f"group flags above this multiple of the median group (default {FLAG_RATIO})")
+    p.add_argument("--spread", type=float, default=SPREAD,
+                   help=f"blame a single node only above this in-group spread (default {SPREAD})")
     return p.parse_args()
 
 
@@ -69,12 +91,59 @@ def load(path: pathlib.Path):
         ep=cfg["ep"],
         world=d["world"],
         tokens=cfg["num_tokens"], hidden=cfg["hidden"], fp8=cfg["fp8"],
-        d_avg=statistics.fmean(disp), d_med=statistics.median(disp), d_p90=pct(disp, 0.90),
-        c_avg=statistics.fmean(comb) if comb else float("nan"),
+        d_avg=statistics.mean(disp), d_med=statistics.median(disp), d_p90=pct(disp, 0.90),
+        c_avg=statistics.mean(comb) if comb else float("nan"),
         c_med=statistics.median(comb) if comb else float("nan"),
         c_p90=pct(comb, 0.90) if comb else float("nan"),
         samples=len(disp),
     )
+
+
+def pick_culprits(path: pathlib.Path, flag_ratio: float, spread: float) -> int:
+    """Exclude candidates for one bench run: node names on stdout, why on stderr.
+
+    A group whose mean dispatch exceeds flag_ratio x the median group is slow.
+    Inside it, the node to drop is the CALM one: in the failure mode this
+    targets (3144698) the culprit's own dispatch returns promptly while its
+    peers block on the rendezvous, so they time ~2x while it times ~1.1x.
+    When a flagged group shows no such spread there is no scapegoat and every
+    node in it goes on the list.
+    """
+    d = json.loads(path.read_text())
+    groups = collections.defaultdict(list)
+    for r in d["ranks"]:
+        groups[r["group_id"]].append(r)
+    if len(groups) < MIN_GROUPS:
+        print(f"only {len(groups)} group(s) -- the median group is not a baseline; "
+              f"refusing to blame anyone", file=sys.stderr)
+        return 0
+
+    g_mean = {g: statistics.mean([t for r in rs for t in r["dispatch_us"]])
+              for g, rs in groups.items()}
+    base = statistics.median(g_mean.values())
+
+    for g, m in sorted(g_mean.items()):
+        if m <= flag_ratio * base:
+            continue
+        per_node = collections.defaultdict(list)
+        for r in groups[g]:
+            per_node[r["host"]].extend(r["dispatch_us"])
+        n_mean = {h: statistics.mean(v) for h, v in per_node.items()}
+        detail = " ".join(f"{h.replace('nid00', '')}={v:.0f}"
+                          for h, v in sorted(n_mean.items()))
+        if max(n_mean.values()) / min(n_mean.values()) >= spread:
+            calm = min(n_mean, key=n_mean.get)
+            print(calm)
+            print(f"SLOW group {g} at {m / base:.2f}x the median group "
+                  f"({base:.0f} us): peers stall on the calm node -> "
+                  f"exclude {calm}   [{detail}]", file=sys.stderr)
+        else:
+            for h in sorted(n_mean):
+                print(h)
+            print(f"SLOW group {g} at {m / base:.2f}x the median group "
+                  f"({base:.0f} us), no calm outlier -> exclude the whole "
+                  f"group   [{detail}]", file=sys.stderr)
+    return 0
 
 
 def section(rows: list, ep: int) -> list:
@@ -159,6 +228,11 @@ def cross_ep(by_ep: dict, flagged: list, listed: set) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.pick_culprits:
+        if not args.bench_json or not args.bench_json.is_file():
+            print("--pick-culprits needs --bench-json pointing at one run", file=sys.stderr)
+            return 1
+        return pick_culprits(args.bench_json, args.flag_ratio, args.spread)
     if not args.dir.is_dir():
         print(f"no results dir {args.dir}", file=sys.stderr)
         return 1

@@ -27,7 +27,7 @@ import torch
 import torch.distributed as dist
 
 # Same threshold as tools/ep_slow_nodes.py, so "slow" means the same thing here.
-SLOW = 1.5
+SLOW = 1.2
 
 
 def parse_args() -> argparse.Namespace:

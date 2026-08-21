@@ -31,7 +31,10 @@ mkdir -p "$LOGDIR"
 # => no change to a normal submission.
 read -ra _extra_sbatch_args <<< "${EXTRA_SBATCH_ARGS:-}"
 
-EXCLUDE_FILE="$SCRIPTS_ROOT/common/filter/exclude_dual_flag.txt"
+# Exclude list = what the pre-flight auto-exclude loop has learned, nothing
+# else. Setting EXCLUDE_FILE overrides it (prelaunch.sh passes its own merged
+# list); NODELIST_FILE still takes precedence when set.
+EXCLUDE_FILE="${EXCLUDE_FILE:-$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt}"
 NODELIST_FILE="${NODELIST_FILE:-}"
 
 if [[ -n "$NODELIST_FILE" ]]; then
