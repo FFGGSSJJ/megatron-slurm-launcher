@@ -155,9 +155,11 @@ def _sub_intervals(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
                 if current_start < b_start:
                     differences.append({START: current_start, END: min(a_end, b_start)})
                 current_start = max(current_start, b_end)
-                if current_start < a_end:
-                    differences.append({START: current_start, END: a_end})
-    return pd.DataFrame(differences)
+            # tail after the last overlap; must be emitted once per 'a' row, not
+            # once per overlap, otherwise every b interval re-adds [cur, a_end]
+            if current_start < a_end:
+                differences.append({START: current_start, END: a_end})
+    return pd.DataFrame(differences, columns=[START, END])
 
 
 # ==============================================================================
@@ -207,17 +209,47 @@ class CUDAProfileSimple:
             for row in table:
                 print(f"{row[0]:<25} {row[1]:>12} {row[2]:>15} {row[3]:>15}")
 
-        def plot(
-            self,
-            width: int = 16,
-            height: int = 9,
-            font_size: int = 14,
-            min_visible_pct: float = 0.01,
-        ) -> None:
-            """Draw a nested pie chart with breakdown metrics in inner ring."""
-            import matplotlib.pyplot as plt
+        # value below which a metric renders as "0.0%" and is dropped from figures
+        _HIDE_BELOW_FRAC: float = 0.0005
 
-            # Validate no negative durations
+        def _visible_metrics(self) -> list[CUDAProfileSimple.Metric]:
+            """Metrics with anything that would print as 0.0% dropped.
+
+            Zero-duration entries (FP8 quant on a bf16 run, DeepEP when EP goes
+            over NCCL) carry no information in a figure and only cost a row or a
+            legend line, so they are filtered before drawing -- display() still
+            reports every category.
+            """
+            visible = []
+            for m in self.metrics:
+                if m.dur_ns / self.dur_ns < self._HIDE_BELOW_FRAC:
+                    continue
+                breakdown = [
+                    bm for bm in m.breakdown
+                    if bm.dur_ns / self.dur_ns >= self._HIDE_BELOW_FRAC
+                ]
+                visible.append(dataclasses.replace(m, breakdown=breakdown))
+            return visible
+
+        @staticmethod
+        def _style():
+            """Load the shared figure style; returns the plot_style module."""
+            sys.path.insert(0, str(pathlib.Path(__file__).parent))
+            import plot_style
+
+            plot_style.apply_style()
+            return plot_style
+
+        def _colors(self, style) -> dict[str, str]:
+            """Map the report's matplotlib color names to the Google palette."""
+            return {
+                "firebrick": style.G_RED,
+                "coral": style.G_YELLOW,
+                "steelblue": style.G_BLUE,
+                "grey": style.G_GREY,
+            }
+
+        def _check_durations(self) -> None:
             for m in self.metrics:
                 if m.dur_ns < 0:
                     raise ValueError("Negative duration not supported")
@@ -225,126 +257,247 @@ class CUDAProfileSimple:
                     if bm.dur_ns < 0:
                         raise ValueError("Negative duration not supported")
 
-            _, ax = plt.subplots(1, 1, figsize=(width, height))
-            ax.set_title(
-                f"{self.title}: {self.dur_ns * 1e-9:.3f}s",
-                fontsize=font_size + 2,
-                fontweight="bold",
+        def _save(self, fig, out_dir: str, suffix: str, dpi: int) -> None:
+            import matplotlib.pyplot as plt
+
+            stem = pathlib.Path(out_dir) / f"{self.title.replace(' ', '_')}_{suffix}"
+            stem.parent.mkdir(parents=True, exist_ok=True)
+            for ext in (".png", ".pdf"):
+                fig.savefig(stem.with_suffix(ext), dpi=dpi)
+            plt.close(fig)
+            print(f"wrote {stem}.png and {stem}.pdf")
+
+        def plot(
+            self,
+            out_dir: str = ".",
+            figsize: tuple[float, float] = (7.4, 4.8),
+            dpi: int = 300,
+        ) -> None:
+            """Grouped horizontal bars: one row per category, indented rows per breakdown.
+
+            Complements plot_pie(): a pie cannot show a 0.2% RMSNorm term next to
+            an 89% comm term, and it has no place to put the step wall time, which
+            is what makes the comm/compute overlap visible (the categories overlap
+            in time, so they can sum past the wall).
+            """
+            import numpy as np
+            import matplotlib.pyplot as plt
+
+            self._check_durations()
+            style = self._style()
+            palette = self._colors(style)
+
+            # rows, top to bottom: category then its breakdown, shaded lighter
+            rows: list[tuple[str, int, str, bool]] = []
+            for m in self._visible_metrics():
+                base = palette.get(m.color, m.color)
+                rows.append((m.name, m.dur_ns, style.darken(style.paper(base), 0.22), True))
+                shades = np.linspace(0.0, 0.45, max(len(m.breakdown), 1))
+                for bm, shade in zip(m.breakdown, shades):
+                    rows.append(
+                        (f"   {bm.name}", bm.dur_ns, style.lighten(style.paper(base), shade), False)
+                    )
+
+            # y positions, with a gap before each new category
+            ypos: list[float] = []
+            y = 0.0
+            for idx, (_, _, _, is_cat) in enumerate(rows):
+                if is_cat and idx:
+                    y += 0.7
+                ypos.append(y)
+                y += 1.0
+
+            wall_s = self.dur_ns * 1e-9
+            values_s = [v * 1e-9 for _, v, _, _ in rows]
+            x_max = wall_s * 1.13
+
+            fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
+            ax.barh(
+                ypos,
+                values_s,
+                color=[c for _, _, c, _ in rows],
+                edgecolor="#333333",
+                linewidth=0.5,
+                height=[0.78 if is_cat else 0.62 for _, _, _, is_cat in rows],
             )
+
+            # value labels: inside the bar once it would otherwise run off the axis
+            for yp, v, (_, _, _, is_cat) in zip(ypos, values_s, rows):
+                inside = v > 0.55 * x_max
+                ax.text(
+                    v - 0.012 * x_max if inside else v + 0.012 * x_max,
+                    yp,
+                    f"{v:.3f} s  ({v / wall_s * 100:.1f}%)",
+                    va="center",
+                    ha="right" if inside else "left",
+                    fontsize=9,
+                    fontweight="bold" if is_cat else "normal",
+                    color="white" if inside else "#333333",
+                )
+
+            # dashed separator above each category after the first
+            for idx, (yp, (_, _, _, is_cat)) in enumerate(zip(ypos, rows)):
+                if is_cat and idx:
+                    ax.axhline(yp - 0.85, linestyle="--", color="#cccccc", linewidth=0.7)
+
+            # step wall time as the reference the categories are measured against
+            ax.axvline(wall_s, linestyle="--", color="#888888", linewidth=0.9)
+            ax.text(
+                wall_s - 0.008 * x_max,
+                ypos[0] - 1.0,
+                f"step wall  {wall_s:.3f} s",
+                ha="right",
+                va="center",
+                fontsize=8.5,
+                color="#5F6368",
+            )
+
+            ax.set_yticks(ypos)
+            ax.set_yticklabels([label for label, _, _, _ in rows])
+            for tick, (_, _, _, is_cat) in zip(ax.get_yticklabels(), rows):
+                if is_cat:
+                    tick.set_fontweight("bold")
+            ax.set_ylim(ypos[-1] + 0.8, ypos[0] - 1.6)
+            ax.set_xlim(0, x_max)
+            ax.set_xlabel("GPU time (s)", fontweight="bold")
+            ax.grid(axis="x", linestyle="--", alpha=0.4)
+            ax.grid(axis="y", visible=False)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+
+            ax.set_title(self.title, loc="left", pad=16)
+            ax.text(
+                0.0, 1.012, self._subtitle(),
+                transform=ax.transAxes, fontsize=8.5, color="#5F6368", va="bottom",
+            )
+
+            self._save(fig, out_dir, "breakdown", dpi)
+
+        def _subtitle(self) -> str:
+            wall_s = self.dur_ns * 1e-9
+            total_pct = sum(m.dur_ns for m in self.metrics) / self.dur_ns * 100
+            subtitle = f"one profiled step, {wall_s:.3f} s wall"
+            if total_pct > 100.5:
+                subtitle += f" · categories overlap in time: Σ = {total_pct:.1f}% of wall"
+            return subtitle
+
+        def plot_pie(
+            self,
+            out_dir: str = ".",
+            figsize: tuple[float, float] = (8.4, 4.8),
+            dpi: int = 300,
+            min_visible_pct: float = 0.01,
+        ) -> None:
+            """Nested donut: categories in the outer ring, breakdown in the inner one.
+
+            Shares of the step at a glance. Wedge labels stay outside the ring --
+            drawn inside they pile up on top of each other once a category drops
+            below a few percent; the hierarchical legend carries the numbers.
+            """
+            import matplotlib.pyplot as plt
+
+            self._check_durations()
+            style = self._style()
+            palette = self._colors(style)
+            metrics = self._visible_metrics()
+
+            fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
 
             # ========== Inner ring: breakdown items ==========
             inner_values: list[int] = []
-            inner_labels: list[str] = []
             inner_colors: list[str] = []
             inner_hatches: list[str | None] = []
-
-            for m in self.metrics:
+            for m in metrics:
+                base = palette.get(m.color, m.color)
                 if not m.breakdown:
                     # No breakdown: add placeholder for alignment
                     inner_values.append(m.dur_ns)
-                    inner_labels.append("")
-                    inner_colors.append(m.color)
+                    inner_colors.append(style.paper(base))
                     inner_hatches.append(None)
-                else:
-                    # Has breakdown: add each breakdown item
-                    inner_values.extend([bm.dur_ns for bm in m.breakdown])
-                    inner_labels.extend([
-                        f"{bm.name}\n{bm.dur_ns / self.dur_ns * 100:.2f}%"
-                        if bm.dur_ns / self.dur_ns > min_visible_pct
-                        else ""
-                        for bm in m.breakdown
-                    ])
-                    inner_colors.extend([m.color for _ in m.breakdown])
-                    inner_hatches.extend([bm.hatch for bm in m.breakdown])
+                    continue
+                shades = [
+                    style.lighten(style.paper(base), t)
+                    for t in ([0.0] if len(m.breakdown) == 1
+                              else [0.45 * i / (len(m.breakdown) - 1) for i in range(len(m.breakdown))])
+                ]
+                inner_values.extend([bm.dur_ns for bm in m.breakdown])
+                inner_colors.extend(shades)
+                inner_hatches.extend([bm.hatch for bm in m.breakdown])
 
-            # Draw inner pie (radius=0.5, width=0.5)
-            inner_results = ax.pie(
+            inner_handles = ax.pie(
                 inner_values,
-                labels=inner_labels,
                 colors=inner_colors,
-                radius=0.5,
-                labeldistance=0.35,
+                radius=0.68,
                 startangle=90,
-                wedgeprops={"width": 0.5, "edgecolor": "black"},
-                textprops={"fontsize": font_size // 2},
-            )
-            inner_handles = inner_results[0]
-            inner_texts = inner_results[1]
-
-            # Add white background to inner labels
-            for text in inner_texts:
-                text.set_bbox({"facecolor": "white", "alpha": 0.5, "edgecolor": "None"})
-
-            # Apply hatch patterns to inner wedges
-            for idx, h in enumerate(inner_handles):
-                hatch = inner_hatches[idx]
+                counterclock=False,
+                wedgeprops={"width": 0.30, "edgecolor": "#333333", "linewidth": 0.5},
+            )[0]
+            for handle, hatch in zip(inner_handles, inner_hatches):
                 if hatch is not None:
-                    h.set_hatch(hatch)
+                    handle.set_hatch(hatch)
 
             # ========== Outer ring: top-level categories ==========
-            outer_values = [m.dur_ns for m in self.metrics]
-            outer_labels = [
-                m.name if m.dur_ns / self.dur_ns > min_visible_pct else ""
-                for m in self.metrics
-            ]
-            outer_colors = [m.color for m in self.metrics]
-
-            # Draw outer pie (radius=1, width=0.5)
-            outer_results = ax.pie(
-                outer_values,
-                labels=outer_labels,
-                colors=outer_colors,
-                autopct=lambda pct: f"{pct:.1f}%" if pct > 100 * min_visible_pct else "",
-                radius=1,
-                pctdistance=0.8,
-                labeldistance=1.02,
+            total_ns = self.dur_ns
+            # matplotlib's autopct normalizes to the wedge sum; the categories
+            # overlap and sum past the wall, so rescale to keep the ring, the
+            # legend and plot() all quoting the same denominator (wall time).
+            pct_scale = sum(m.dur_ns for m in metrics) / total_ns
+            outer_handles, _, outer_auto_texts = ax.pie(
+                [m.dur_ns for m in metrics],
+                labels=[
+                    m.name if m.dur_ns / total_ns > min_visible_pct else ""
+                    for m in metrics
+                ],
+                colors=[style.darken(style.paper(palette.get(m.color, m.color)), 0.22) for m in metrics],
+                autopct=lambda pct: f"{pct * pct_scale:.1f}%" if pct > 100 * min_visible_pct else "",
+                radius=1.0,
+                pctdistance=0.84,
+                labeldistance=1.04,
                 startangle=90,
-                wedgeprops={"width": 0.5, "edgecolor": "black"},
-                textprops={"fontsize": font_size},
+                counterclock=False,
+                wedgeprops={"width": 0.32, "edgecolor": "#333333", "linewidth": 0.5},
+                textprops={"fontsize": 11},
             )
-            outer_handles = outer_results[0]
-            outer_auto_texts = outer_results[2]
-
-            # Add white background to outer percentage labels
             for text in outer_auto_texts:
-                text.set_bbox({"facecolor": "white", "alpha": 0.5, "edgecolor": "None"})
-
+                text.set_color("white")
+                text.set_fontweight("bold")
+                text.set_fontsize(9.5)
             ax.set_aspect("equal")
 
             # ========== Legend with hierarchical breakdown ==========
-            inner_handle_idx = 0
             legend_handles = []
             legend_labels = []
-
-            for outer_idx, m in enumerate(self.metrics):
-                # Add top-level category
+            inner_idx = 0
+            for outer_idx, m in enumerate(metrics):
                 legend_handles.append(outer_handles[outer_idx])
                 legend_labels.append(
-                    f"{m.dur_ns / self.dur_ns * 100:6.2f}% {m.name + ':':20} {m.dur_ns * 1e-9:.3f}s"
+                    f"{m.dur_ns / total_ns * 100:6.2f}%  {m.name + ':':16}{m.dur_ns * 1e-9:7.3f} s"
                 )
-
                 if not m.breakdown:
-                    inner_handle_idx += 1
-                else:
-                    # Add breakdown items
-                    legend_handles.extend([inner_handles[inner_handle_idx + i] for i, _ in enumerate(m.breakdown)])
-                    legend_labels.extend([
-                        f"    ├ {bm.dur_ns / self.dur_ns * 100:6.2f}% {bm.name + ':':14} {bm.dur_ns * 1e-9:.3f}s"
-                        for bm in m.breakdown
-                    ])
-                    inner_handle_idx += len(m.breakdown)
+                    inner_idx += 1
+                    continue
+                for offset, bm in enumerate(m.breakdown):
+                    legend_handles.append(inner_handles[inner_idx + offset])
+                    legend_labels.append(
+                        f"  ├{bm.dur_ns / total_ns * 100:6.2f}%  {bm.name + ':':14}{bm.dur_ns * 1e-9:7.3f} s"
+                    )
+                inner_idx += len(m.breakdown)
 
             ax.legend(
                 legend_handles,
                 legend_labels,
                 loc="center left",
-                bbox_to_anchor=(1, 0.5),
-                prop={"size": font_size, "family": "monospace"},
+                bbox_to_anchor=(0.98, 0.5),
+                prop={"size": 9.5, "family": "monospace"},
             )
 
-            plt.tight_layout()
-            # plt.show()
-            plt.savefig(f"./mytools/{self.title.replace(' ', '_')}_pie_chart.png", dpi=600)
+            ax.set_title(self.title, loc="left", pad=16)
+            ax.text(
+                0.0, 1.012, self._subtitle(),
+                transform=ax.transAxes, fontsize=8.5, color="#5F6368", va="bottom",
+            )
+
+            self._save(fig, out_dir, "pie", dpi)
 
     # Instance variables
     title: str
@@ -869,57 +1022,34 @@ class CUDAProfileSimple:
 
         return cls(title, table, blocking_call_df, **kwargs)
 
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Break one nsys report into Computation / Memory / Communication / Other."
+    )
+    parser.add_argument("nsys_rep", nargs="+", help="path(s) to .nsys-rep files")
+    parser.add_argument("--title", help="report title (default: file stem); only with a single file")
+    parser.add_argument("--device", type=int, default=0, help="CUDA device id to analyze (default: 0)")
+    parser.add_argument("--plot", action="store_true", help="also write a pie chart")
+    parser.add_argument(
+        "--out-dir",
+        default=str(pathlib.Path(__file__).parent / "fig"),
+        help="where --plot writes the png (default: tools/fig)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.title and len(args.nsys_rep) > 1:
+        parser.error("--title only makes sense with a single report")
+
+    for path in args.nsys_rep:
+        title = args.title or pathlib.Path(path).stem
+        profile = CUDAProfileSimple.load_from(title, path, device_id=args.device)
+        profile.report.display()
+        if args.plot:
+            profile.report.plot(out_dir=args.out_dir)
+            profile.report.plot_pie(out_dir=args.out_dir)
+
+
 if __name__ == "__main__":
-    # profile = CUDAProfileSimple.load_from(
-    #     "qwen3-30b-a3b-4n-ep2pp4tp1dp4-4096seql-2mbs",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys/nsys-1668456-rank0.nsys-rep"
-    # )
-    # profile = CUDAProfileSimple.load_from(
-    #     "nsys-nid006904-rank0",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys/nsys-nid006904-rank0.nsys-rep"
-    # )
-    # profile = CUDAProfileSimple.load_from(
-    #     "dense-8b-4n-pp1tp2dp8-4096seql",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys/nsys-1679254-rank0.nsys-rep"
-    # )
-    # profile = CUDAProfileSimple.load_from(
-    #     "ling-16b-a1b6-4n-ep4-mbs4-gg-fp8act",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys/nsys-apertus_16b_a1b6-climbmix-4n-4096sl-1024gbsz-4mbsz-0.00037lr-1tp-1pp-4ep-1etp-1cp-fp8acttrue-mockrtrue-newmegatron_py2512_gqa_ncclag_gg.nsys-rep"
-    # )
-    # profile.report.display()
-    # profile.report.plot()
-
-    # profile = CUDAProfileSimple.load_from(
-    #     "ling-16b-a1b6-4n-ep4-mbs2-gg-fp8act",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys/nsys-apertus_16b_a1b6-climbmix-4n-4096sl-1024gbsz-2mbsz-0.00037lr-1tp-1pp-4ep-1etp-1cp-fp8acttrue-mockrtrue-newmegatron_py2512_gqa_ncclag_gg.nsys-rep"
-    # )
-    # profile.report.display()
-    # profile.report.plot()
-
-    # profile = CUDAProfileSimple.load_from(
-    #     "ling-16b-a1b6-4n-ep4-mbs2-te-bf16",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys/nsys-apertus_16b_a1b6-climbmix-4n-4096sl-1024gbsz-2mbsz-0.00037lr-1tp-1pp-4ep-1etp-1cp-fp8actfalse-mockrtrue-newmegatron_py2512_gqa_ncclag_gg.nsys-rep"
-    # )
-    # profile.report.display()
-    # profile.report.plot()
-
-    # profile = CUDAProfileSimple.load_from(
-    #     "ling-16b-a1b6-4n-ep4-mbs2-gg-bf16",
-    #     "/iopsstor/scratch/cscs/gfu/slurmlogs/nsys//nsys-apertus_16b_a1b6-climbmix-4n-4096sl-1024gbsz-2mbsz-0.00037lr-1tp-1pp-4ep-1etp-1cp-fp8actfalse-mockrtrue-ggtruenewmegatron_py2512_gqa_ncclag.nsys-rep"
-    # )
-    # profile.report.display()
-    # profile.report.plot()
-
-    profile = CUDAProfileSimple.load_from(
-        "ling-16b-a1b6-4n-ep4-mbs4-gg-fp8-perfdrop-20-23",
-        "/iopsstor/scratch/cscs/gfu/slurmlogs/2026-03-27/nsys/nsys-apertus_16b_a1b6-climbmix-4n-4096sl-1024gbsz-4mbsz-0.00024lr-1tp-1pp-4ep-1etp-1cp-fp8acttrue-mockrfalse-ggtruenewmegatron_py2512_gqa_ncclag.nsys-rep"
-    )
-    profile.report.display()
-    profile.report.plot()
-
-    profile = CUDAProfileSimple.load_from(
-        "ling-16b-a1b6-4n-ep4-mbs4-te-bf16-perfdrop-20-23",
-        "/iopsstor/scratch/cscs/gfu/slurmlogs/2026-03-27/nsys/nsys-apertus_16b_a1b6-climbmix-4n-4096sl-1024gbsz-2mbsz-0.00024lr-1tp-1pp-4ep-1etp-1cp-fp8actfalse-mockrfalse-ggfalsenewmegatron_py2512_gqa_ncclag.nsys-rep"
-    )
-    profile.report.display()
-    profile.report.plot()
+    main()
