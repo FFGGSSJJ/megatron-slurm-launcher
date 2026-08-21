@@ -72,7 +72,11 @@ RUN pip install /tmp/deep_gemm-2.6.1+local-cp312-cp312-linux_aarch64.whl
 RUN pip uninstall -y grouped_gemm
 COPY ./nv_grouped_gemm-1.1.4.post8-cp312-cp312-linux_aarch64.whl /tmp/
 RUN pip install /tmp/nv_grouped_gemm-1.1.4.post8-cp312-cp312-linux_aarch64.whl
-RUN pip uninstall -y nvidia-resiliency-ext
-RUN pip install nvidia-resiliency-ext
+# Megatron-LM pins nvidia-resiliency-ext==0.6.0 (pyproject.toml)
+RUN pip uninstall -y nvidia-resiliency-ext \
+    && pip install nvidia-resiliency-ext==0.6.0 \
+    && python3 -c "import nvidia_resiliency_ext as n; assert n.__version__ == '0.6.0', n.__version__"
 RUN pip install --no-build-isolation git+https://github.com/FFGGSSJJ/Emerging-Optimizers.git@fuguan/moonlight_scale
+RUN pip uninstall -y flash-linear-attention
+RUN pip install --no-build-isolation git+https://github.com/fla-org/flash-linear-attention@v0.5.2
 #RUN pip install --no-build-isolation git+https://github.com/FFGGSSJJ/grouped_gemm@dev/grad_acc_fuse

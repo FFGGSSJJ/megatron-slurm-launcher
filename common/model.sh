@@ -179,9 +179,9 @@ if [ "$NORMALIZATION" == "sandwich-norm" ]; then
 fi
 
 # Scaling of embeddings and residuals
-NETWORK_SIZE_ARGS+=(
-	--scale-embeddings-by-sqrt-hidden
-)
+# NETWORK_SIZE_ARGS+=(
+# 	--scale-embeddings-by-sqrt-hidden
+# )
 
 # Attention type: GQA vs MLA. MLA_ARGS is empty for GQA so it expands to nothing.
 MLA_ARGS=()

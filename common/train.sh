@@ -109,7 +109,7 @@ fi
 # file and passed via --data-args-path instead of argv; Megatron reads the same
 # token-proportional blend from the file.
 : "${DATA_ARGS_FILE_THRESHOLD:=256}"
-: "${NUM_WORKERS:=16}"
+: "${NUM_WORKERS:=4}"
 # Cross-document attention handling. CROSS_DOC_ATTENTION=true emits the
 # --reset-position-ids/--reset-attention-mask/--eod-mask-loss trio.
 #
@@ -150,6 +150,12 @@ esac
 : "${BACKUP_CODEBASE:=false}"
 : "${CKPT_FORMAT:=torch_dist}"
 
+# -- Rerun state machine --
+: "${CHECK_GRAD_NORM:=false}"
+: "${RERUN_STRATEGY:=}"                 # empty = Megatron default (rerun_in_place)
+: "${ERROR_INJECTION_RATE:=0}"          # 0 = off; N = fake a rejection 1 call in N
+: "${ERROR_INJECTION_TYPE:=correct_result}"  # correct_result | transient_error | persistent_error
+
 # -- Debugging / profiling --
 : "${TENSORBOARD_LOG_INTERVAL:=}"       # empty = Megatron default (1)
 : "${LOG_NCCL:=false}"
@@ -188,6 +194,7 @@ fi
 # =============================================================================
 source "$COMMON_DIR/model.sh"
 source "$COMMON_DIR/engine.sh"
+source "$COMMON_DIR/prelaunch.sh"
 
 # ---- Model size / FLOPs summary ----------------------------------------------
 MODEL_STATS=""
@@ -309,6 +316,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export MEGATRON_STRAGGLER_DUMP=/iopsstor/scratch/cscs/gfu/straggler-log/$SLURM_JOB_ID.csv
 
 # torch.distributed wants MASTER_ADDR / MASTER_PORT / WORLD_SIZE before srun;
 # RANK / LOCAL_RANK are set at the srun command.
@@ -328,10 +336,39 @@ LOGGING_ARGS=(
 	# --no-log-loss-scale-to-tensorboard
 	--log-memory-to-tensorboard
 	--log-timers-to-tensorboard
-	--log-params-norm
+	# --log-params-norm
 	--moe-per-layer-logging
-	--log-memory-interval 100
+	--log-memory-interval 5
+	--log-device-memory-used
+
+	--timing-log-level 2
+	--log-straggler
+
+	# --comm-simulator
+	# --comm-simulator-disk-load
 )
+
+if [ "$CHECK_GRAD_NORM" = true ]; then
+	LOGGING_ARGS+=(--check-grad-norm)
+	LOGGING_ARGS+=(--check-grad-norm-threshold 3.0)
+fi
+
+# -- Rerun state machine --
+# RERUN_STRATEGY decides what happens to a rejected result:
+#   rerun_in_place  replay the iteration to attribute it to a transient/persistent HW fault
+#   skip_iteration  discard the offending global batch and rerun on the next one, so the
+#                   optimizer never sees it
+# ERROR_INJECTION_RATE fakes a rejection once every N validate_result() calls (0 = off) 
+if [ -n "$RERUN_STRATEGY" ]; then
+	LOGGING_ARGS+=(--rerun-strategy $RERUN_STRATEGY)
+fi
+
+if [ "$ERROR_INJECTION_RATE" -gt 0 ] 2>/dev/null; then
+	LOGGING_ARGS+=(
+		--error-injection-rate $ERROR_INJECTION_RATE
+		--error-injection-type $ERROR_INJECTION_TYPE
+	)
+fi
 
 if [ -n "$TENSORBOARD_LOG_INTERVAL" ]; then
 	LOGGING_ARGS+=(--tensorboard-log-interval $TENSORBOARD_LOG_INTERVAL)
@@ -504,6 +541,7 @@ else
   export WANDB_MODE=disabled
   echo "[$(date)] No WANDB API key found. WANDB logging disabled."
 fi
+export WANDB_RUN_ID=$SLURM_JOB_ID
 
 # =============================================================================
 # PROFILING
@@ -601,21 +639,38 @@ fi   # end DRY_RUN snapshot skip
 # LAUNCH
 # =============================================================================
 # Only the Triton cache is persisted, in $JIT_CACHE_BASE (common/paths.sh;
-# override it in a launch script before sourcing this file), and SHARED by all
-# ranks: it writes via temp-file + atomic rename, so concurrent ranks are safe,
-# a kernel is compiled once instead of once per rank, and the cache stays valid
-# when the rank layout changes. That is what keeps kernels from recompiling at
-# every launch.
+# override it in a launch script before sourcing this file), split into one dir
+# PER NODE. It used to be a single dir shared by every rank, which raced:
+# triton's FileCacheManager.put writes a temp file and os.replace's it into
+# place with no fsync, so on Lustre another node can see the renamed inode
+# before its data is visible and reads an empty metadata json -- then
+# CompiledKernel.__init__ dies with "JSONDecodeError: Expecting value: line 1
+# column 1" (job 2913548, rank 10). The window only exists while an entry is
+# COLD, so it bites after any change that reshapes kernels: conv_dim_local_tp =
+# conv_dim / TP reaches the FLA conv kernel as a constexpr, so TP 4 -> 1 alone
+# recompiles the whole KDA kernel set.
+#
+# Per node rather than per rank: the visibility bug is cross-CLIENT, and the
+# ranks on one node share a Lustre client and its page cache, so os.replace
+# publishes coherently among them -- same protection at 1/4 the inode
+# footprint. The key is derived from SLURM_PROCID, not \$SLURMD_NODENAME, so it
+# stays stable across jobs; a hostname key would go cold on every allocation.
+# A cold config is compiled once per node, all nodes in parallel, and stays
+# warm after that -- that is what keeps kernels from recompiling at every launch.
 #
 # Inductor and cpp_extension caches go to node-local /tmp, per job and per rank:
 # both guard writes with file locks that can stall when hundreds of ranks
 # contend on Lustre, so they are rebuilt per job rather than persisted.
 #
-# The bases expand here ($SLURM_JOB_ID is the same for every task), \$SLURM_PROCID
-# does NOT: in this batch script it is pinned to 0, so exporting it here would
-# hand every rank the same value (srun propagates our env).
-CACHE_ENV="export TRITON_HOME=$JIT_CACHE_BASE/.triton \
-TRITON_CACHE_DIR=$JIT_CACHE_BASE/.triton/cache \
+# The bases expand here ($SLURM_JOB_ID and $SLURM_GPUS_PER_NODE are identical
+# for every task), \$SLURM_PROCID does NOT: in this batch script it is pinned to
+# 0, so exporting it here would hand every rank the same value (srun propagates
+# our env). Bash does not re-expand the result of a parameter expansion, so the
+# \$((...)) below survives "bash -c \"\$PER_RANK_CMD\"" intact and is evaluated
+# inside the task, where SLURM_PROCID is real.
+# DG_JIT_CACHE_DIR=/tmp/deep_gemm-$SLURM_JOB_ID \
+CACHE_ENV="export TRITON_HOME=$JIT_CACHE_BASE/.triton/n\$((SLURM_PROCID/${SLURM_GPUS_PER_NODE:-4})) \
+TRITON_CACHE_DIR=$JIT_CACHE_BASE/.triton/n\$((SLURM_PROCID/${SLURM_GPUS_PER_NODE:-4}))/cache \
 TORCHINDUCTOR_CACHE_DIR=/tmp/$SLURM_JOB_ID/.torch_inductor/\$SLURM_PROCID \
 TORCH_EXTENSIONS_DIR=/tmp/$SLURM_JOB_ID/.torch_ext/\$SLURM_PROCID; \
 mkdir -p \$TRITON_CACHE_DIR \$TORCHINDUCTOR_CACHE_DIR \$TORCH_EXTENSIONS_DIR;"
@@ -630,7 +685,7 @@ mkdir -p \$TRITON_CACHE_DIR \$TORCHINDUCTOR_CACHE_DIR \$TORCH_EXTENSIONS_DIR;"
 # tools/ep_cross_group_ranks.py) derives ranks from the allocation order; this
 # makes each run carry the ground truth so a trace can be checked instead of
 # trusted. grep RANKMAP on the .out to recover it.
-PER_RANK_CMD="$CACHE_ENV echo RANKMAP \$SLURM_PROCID \$SLURMD_NODENAME; LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+PER_RANK_CMD="$CACHE_ENV export PYTHONPATH=$NVRX_SHIM:\$PYTHONPATH; echo RANKMAP \$SLURM_PROCID \$SLURMD_NODENAME; export SLURM_PROCID=\$SLURM_PROCID; LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
 PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
 # --wait 60 / --kill-on-bad-exit=1: once one task exits, give the rest 60s and
 # then tear the step down, so a single dead rank can't leave the others spinning
@@ -679,6 +734,9 @@ if [ "$DRY_RUN" = true ]; then
 fi
 # NOTE: per-rank Triton/inductor/torch-extension caches are set in $CACHE_ENV
 # above, inside PER_RANK_CMD — not here, where SLURM_PROCID is always 0.
+
+# Optionally bench the expert a2a on these exact nodes (EP_PREFLIGHT=true).
+prelaunch_ep_bench
 
 if [ "$AUTO_JOB_REQUEUE" = true ]; then
 	echo "[$(date)] $(sbatch --dependency=singleton $0)"

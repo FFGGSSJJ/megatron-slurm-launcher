@@ -25,6 +25,7 @@
 : "${HYPERSPHERE_MODE:=flat}"
 : "${HYPERSPHERE_EMBEDDING_MODE:=row}"
 : "${HYPERSPHERE_ROUTER_MODE:=row}"
+: "${HYPERSPHERE_RADIUS_MODE:=fan_in}"
 : "${HYPERSPHERE_GAINS_MODE:=rowcol}"
 : "${HYPERSPHERE_GAINS_MODE_ROUTER:=rowcol}"    # matches Megatron's own default
 : "${HYPERSPHERE_GAINS_MODE_EMBEDDING:=none}"   # matches Megatron's own default
@@ -36,7 +37,7 @@
 # satisfy it for any model here, so set INIT_METHOD_STD=$(1/sqrt(HIDDEN_SIZE))
 # per experiment -- 0.0167038 for H=3584, 0.0131762 for H=5760, etc.
 : "${HYPERSPHERE_RADIUS_FROM_INIT:=true}"
-: "${MUON_TP_MODE:=blockwise}"              # matches Megatron's own default
+: "${MUON_TP_MODE:=duplicated}"              # matches Megatron's own default
 
 REGULARIZATION_ARGS=(
 	--matrix-lr $MATRIX_LR
@@ -55,6 +56,8 @@ REGULARIZATION_ARGS=(
 	--muon-use-nesterov
 	# --hypersphere-scale-out-proj-init
 	--muon-tp-mode $MUON_TP_MODE
+	--muon-coefficient-type polar_express
+	--muon-router-scale-mode none
 
 	--weight-decay 0.0
 	--adam-beta1 0.9
@@ -63,8 +66,8 @@ REGULARIZATION_ARGS=(
     --hidden-dropout 0.0
 )
 
-if [ "$HYPERSPHERE_RADIUS_FROM_INIT" = true ]; then
-	REGULARIZATION_ARGS+=(--hypersphere-radius-from-init)
+if [ -n "$HYPERSPHERE_RADIUS_MODE" ]; then
+	REGULARIZATION_ARGS+=(--hypersphere-radius-mode $HYPERSPHERE_RADIUS_MODE)
 fi
 
 if [ -n "$HYPERSPHERE_GAINS_MODE_ROUTER" ]; then

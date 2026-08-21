@@ -104,6 +104,12 @@ if [ "$USE_EXPERTS_OFFLOADING" = true ]; then
 				--moe-offload-activations $MOE_OFFLOAD_ACTIVATIONS
 			)
 		fi
+
+		if [ "$MOE_OFFLOAD_MAIN_GRAD" = true ]; then
+			OPTIMIZATION_ARGS+=(
+				--moe-offload-main-grad
+			)
+		fi
 	fi
 	if [ "$USE_OFFLOADING_DEBUG" = true ]; then
 		OPTIMIZATION_ARGS+=(

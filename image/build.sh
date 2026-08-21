@@ -22,7 +22,7 @@
 # =============================================================================
 #SBATCH --account=infra01
 #SBATCH --partition=normal
-#SBATCH --time=2:00:00
+#SBATCH --time=5:00:00
 #SBATCH --cpus-per-task=288
 #SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --output=build_%j.log
