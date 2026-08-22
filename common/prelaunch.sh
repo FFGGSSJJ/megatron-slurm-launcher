@@ -46,7 +46,7 @@
 : "${EP_PREFLIGHT_AUTO_EXCLUDE:=true}"
 : "${EP_PREFLIGHT_FLAG:=1.2}"          # a group flags at this multiple of the median group
 : "${EP_PREFLIGHT_SPREAD:=1.2}"        # blame ONE node only above this in-group spread
-: "${EP_PREFLIGHT_MAX_NODES:=128}"     # hard cap on dynamic_exclude.txt entries (counts seeded/absorbed ones too)
+: "${EP_PREFLIGHT_MAX_NODES:=256}"     # hard cap on dynamic_exclude.txt entries (counts seeded/absorbed ones too)
 : "${EP_PREFLIGHT_ON_EXHAUST:=run}"    # budget spent: run = train anyway, stop = halt chain
 : "${NCCL_PREFLIGHT:=true}"            # raw-NCCL a2a gate before the EP bench
 : "${NCCL_PREFLIGHT_EP:=}"             # empty = follow the training $EP
