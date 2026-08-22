@@ -23,7 +23,8 @@
 #
 # Auto-exclude loop: when the bench flags a group, the culprit nodes (see
 # ep_bench_report.py --pick-culprits) are appended to common/filter/
-# dynamic_exclude.txt, the job is resubmitted with the merged exclude list by
+# dynamic_exclude.txt -- together with whatever this job was ALREADY excluding,
+# so that one file is the whole exclusion set -- the job is resubmitted by
 # $PREFLIGHT_RESUBMIT (submit.sh by default -- reservation, job-name, log paths;
 # launch/research/gate.sh swaps in the _research launcher), and this job exits
 # WITHOUT training. The singleton dependency queues the replacement until this
@@ -46,7 +47,7 @@
 : "${EP_PREFLIGHT_FLAG:=1.2}"          # a group flags at this multiple of the median group
 : "${EP_PREFLIGHT_SPREAD:=1.2}"        # blame ONE node only above this in-group spread
 : "${EP_PREFLIGHT_MAX_RETRY:=3}"       # auto-exclude resubmits per campaign
-: "${EP_PREFLIGHT_MAX_NODES:=64}"      # hard cap on dynamic_exclude.txt entries (counts hand-seeded ones too)
+: "${EP_PREFLIGHT_MAX_NODES:=128}"     # hard cap on dynamic_exclude.txt entries (counts seeded/absorbed ones too)
 : "${EP_PREFLIGHT_ON_EXHAUST:=run}"    # budget spent: run = train anyway, stop = halt chain
 : "${NCCL_PREFLIGHT:=true}"            # raw-NCCL a2a gate before the EP bench
 : "${NCCL_PREFLIGHT_EP:=}"             # empty = follow the training $EP
@@ -229,14 +230,17 @@ preflight_listed_nodes() {
 # there, not in the launch script's headers. A launcher that submits its own way
 # (see launch/research/gate.sh) sets PREFLIGHT_RESUBMIT to its own function.
 preflight_resubmit_submit_sh() {
-	local merged="$1" submit="$SCRIPTS_ROOT/submit.sh"
+	local submit="$SCRIPTS_ROOT/submit.sh"
+	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
 	if [ -r "$submit" ]; then
-		# keep the submitter's own EXTRA_SBATCH_ARGS (e.g. --nodes) across the resubmit
-		EXCLUDE_FILE="$merged" EXTRA_SBATCH_ARGS="--dependency=singleton ${EXTRA_SBATCH_ARGS:-}" \
+		# no EXCLUDE_FILE override: submit.sh already defaults to the dynamic
+		# list, which now holds the union. EXTRA_SBATCH_ARGS (e.g. --nodes) is
+		# kept across the resubmit.
+		EXTRA_SBATCH_ARGS="--dependency=singleton ${EXTRA_SBATCH_ARGS:-}" \
 			bash "$submit" "$0"
 	else
 		echo "[prelaunch] no $submit -- falling back to bare sbatch (no reservation!)" >&2
-		sbatch --dependency=singleton --exclude="$(paste -sd, - "$merged")" "$0"
+		sbatch --dependency=singleton --exclude="$(paste -sd, - "$dyn")" "$0"
 	fi
 }
 
@@ -292,8 +296,12 @@ preflight_auto_exclude() {
 		return 0
 	fi
 
-	echo "$bad" >> "$dyn"
-	sort -u -o "$dyn" "$dyn"
+	# Fold the culprits AND everything this job was already excluding into the
+	# dynamic list: slurm --exclude takes ONE file, so this is the union, and
+	# every resubmit just points at it.
+	{ printf '%s\n' "$bad"; preflight_listed_nodes; } \
+		| sed '/^[[:space:]]*$/d' | sort -u > "$dyn.tmp"
+	mv "$dyn.tmp" "$dyn"
 	echo "$n_try" > "$tries_file"
 
 	# A node vouched earlier can be flagged now; drop it from the include list so
@@ -304,16 +312,12 @@ preflight_auto_exclude() {
 		mv "$inc.tmp" "$inc"
 	fi
 
-	# Resubmit, never train on this allocation. The merged exclude rides along
-	# as a file -- same format as the lists here. An INCLUDE_FILE pin is
+	# Resubmit, never train on this allocation. An INCLUDE_FILE pin is
 	# deliberately NOT inherited: the replacement must be free to land anywhere.
-	local merged
-	merged="$(dirname "$out")/exclude-merged.txt"
-	preflight_listed_nodes > "$merged"
 	echo "[prelaunch] $(date '+%F %T') auto-exclude -> $dyn (+$n_bad):"
 	printf '%s\n' "$bad" | sed 's/^/  /'
-	echo "[prelaunch] resubmitting via $PREFLIGHT_RESUBMIT (exclude file $merged,"
-	echo "[prelaunch]   $(wc -l < "$merged") nodes), skipping training on this allocation"
-	"$PREFLIGHT_RESUBMIT" "$merged"
+	echo "[prelaunch] resubmitting via $PREFLIGHT_RESUBMIT ($dyn now holds" \
+	     "$(wc -l < "$dyn") nodes), skipping training on this allocation"
+	"$PREFLIGHT_RESUBMIT"
 	exit 0   # ends the batch script: no training, and train.sh's own requeue is skipped
 }
