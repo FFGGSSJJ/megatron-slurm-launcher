@@ -302,9 +302,11 @@ preflight_auto_exclude() {
 
 	# A node vouched earlier can be flagged now; drop it from the include list so
 	# the two stay disjoint and exclusion keeps winning at submission time.
+	# Pruned against the whole list, not just $bad: the write above is a union,
+	# so $dyn can also absorb nodes this job excluded by other means.
 	local inc="$SCRIPTS_ROOT/common/filter/dynamic_include.txt"
-	if [ -r "$inc" ]; then
-		grep -vxF -f <(printf '%s\n' "$bad") "$inc" > "$inc.tmp" || true
+	if [ -r "$inc" ] && [ -s "$dyn" ]; then
+		grep -vxF -f "$dyn" "$inc" > "$inc.tmp" || true
 		mv "$inc.tmp" "$inc"
 	fi
 
