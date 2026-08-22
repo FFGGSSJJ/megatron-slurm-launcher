@@ -11,5 +11,6 @@ bench/logs/*
 bench/logs/
 docs/
 tools/fig
-bench/iostorm/common/filter/dynamic_exclude.txt
+bench/iostorm/
+common/filter/dynamic_exclude.txt
 common/filter/dynamic_include.txt
