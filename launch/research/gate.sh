@@ -63,8 +63,11 @@ preflight_resubmit_research() {
 export SRUN_LAUNCH="srun --cpus-per-task ${SLURM_CPUS_PER_TASK:-72} --mpi=${SRUN_MPI:-pmix} --distribution=block:block ${SRUN_EXTRA_ARGS[*]-} --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
 export WORLD_SIZE=${SLURM_NTASKS:-$(( ${SLURM_NNODES:-1} * 4 ))}
 # torch.distributed rendezvous for the UCCL bench (the NCCL gate bootstraps over
-# MPI and needs neither). Same values lib/common.sh derives later for training.
-export MASTER_ADDR=${MASTER_ADDR:-$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$(hostname)}" | head -n1)}
+# MPI and needs neither). Derived fresh, never inherited: the resubmit exports
+# ALL, so a `:-` default here would hand the replacement job the dead
+# allocation's master and hang it for the full TCPStore timeout. Same
+# unconditional assignment lib/common.sh makes later for training.
+export MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$(hostname)}" | head -n1)
 export MASTER_PORT=${MASTER_PORT:-25678}
 # Slingshot, not IB: without this UCCL picks its verbs transport and finds no NIC.
 # lib/common.sh exports the same later, but only after the gate has run.
