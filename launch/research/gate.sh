@@ -12,7 +12,7 @@
 # the allocation in dynamic_include.txt and falls through to training.
 #
 # Wiring, once, in the _research repo (this repo is its `slurm-launcher` submodule):
-#   git submodule add git@github.com:FFGGSSJJ/megatron-slurm-launcher.git slurm-launcher
+#   git submodule add https://github.com/FFGGSSJJ/megatron-slurm-launcher.git slurm-launcher
 #   git submodule update --init --recursive        # this repo vendors nccl-tests
 #   train.sbatch    : source this file before lib/common.sh
 #   clusters/*.sh   : point --exclude at slurm-launcher/common/filter/dynamic_exclude.txt

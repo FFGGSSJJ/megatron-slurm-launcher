@@ -36,12 +36,12 @@ resubmits per campaign, `EP_PREFLIGHT_MAX_NODES` entries in the exclude list);
 
 ```bash
 cd $MEGATRON_LM_DIR/_research
-git submodule add git@github.com:FFGGSSJJ/megatron-slurm-launcher.git slurm-launcher
+git submodule add https://github.com/FFGGSSJJ/megatron-slurm-launcher.git slurm-launcher
 git submodule update --init --recursive     # this repo vendors nccl-tests itself
 ```
 
-Then the two hunks below. Both are inert when the submodule isn't checked out, so they are safe to commit
-before anyone runs `git submodule update --init`. The gate also stands down under
+Then the two hunks below. Both are inert when the submodule isn't checked out (and the first hunk tries to
+check it out), so they are safe to commit before anyone runs the init by hand. The gate also stands down under
 `DRY_RUN` / `COMMON_NO_LAUNCH`, so `submit.sh --dry-run` and `interactive-run.sh`
 behave as before.
 
@@ -49,11 +49,37 @@ behave as before.
 
 ```bash
 SLURM_LAUNCHER_DIR=${SLURM_LAUNCHER_DIR:-$(cd "$FRAMEWORK_DIR/../.." && pwd)/slurm-launcher}
+_launcher_parent=$(dirname "$SLURM_LAUNCHER_DIR")
+if [ -z "${DRY_RUN:-}${COMMON_NO_LAUNCH:-}" ] \
+    && git -C "$_launcher_parent" rev-parse --git-dir >/dev/null 2>&1; then
+    if [ ! -r "$SLURM_LAUNCHER_DIR/launch/research/gate.sh" ]; then
+        echo ">>> slurm-launcher not initialized -- git submodule update --init --recursive"
+        GIT_TERMINAL_PROMPT=0 timeout 600 git -C "$_launcher_parent" \
+            submodule update --init --recursive -- "$SLURM_LAUNCHER_DIR" \
+            || echo ">>> submodule init failed -- node-health gate skipped" >&2
+    else
+        GIT_TERMINAL_PROMPT=0 timeout 300 git -C "$SLURM_LAUNCHER_DIR" fetch -q origin HEAD \
+            && git -C "$SLURM_LAUNCHER_DIR" merge -q --ff-only FETCH_HEAD \
+            && git -C "$SLURM_LAUNCHER_DIR" submodule update --init --recursive -q \
+            || echo ">>> slurm-launcher not updated (local changes or no network) -- using it as-is" >&2
+    fi
+    echo ">>> slurm-launcher @ $(git -C "$SLURM_LAUNCHER_DIR" describe --always --dirty 2>/dev/null || echo missing)"
+fi
 if [ "${PRELAUNCH_GATE:-true}" = true ] && [ -z "${DRY_RUN:-}${COMMON_NO_LAUNCH:-}" ] \
     && [ -r "$SLURM_LAUNCHER_DIR/launch/research/gate.sh" ]; then
     source "$SLURM_LAUNCHER_DIR/launch/research/gate.sh"
 fi
 ```
+
+Every job keeps the launcher current: an empty submodule dir (fresh `_research`
+clone, no `--init`) self-heals instead of silently skipping the gate, and an
+existing one fast-forwards to the remote tip, so a gate fix or a node-list update
+reaches the next job without bumping the pin. `fetch origin HEAD` + `merge`
+rather than `pull`, because `submodule update` leaves a detached HEAD where a
+bare `fetch` marks every ref not-for-merge and the merge silently no-ops.
+`--ff-only` means local edits stop the update rather than being clobbered, and
+any failure — no network, dirty tree — falls through to the `[ -r ]` guard, so
+the job still trains. The submodule URL is HTTPS so the batch node needs no key.
 
 `launch/framework/clusters/alps3.sh`, in place of the static `--exclude`:
 
