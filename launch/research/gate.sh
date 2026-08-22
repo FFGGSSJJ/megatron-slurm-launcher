@@ -34,7 +34,7 @@ case "$CONTAINER" in
 	*)  IMAGE_ENV=${WORKDIR:-/iopsstor/scratch/cscs/$USER/megatron-apertus-moe}/_research/launch/$CONTAINER ;;
 esac
 
-: "${EP_PREFLIGHT:=false}"   # UCCL bench opt-in here: _research images need not carry UCCL
+: "${EP_PREFLIGHT:=true}"   # UCCL bench opt-in here: _research images need not carry UCCL
 source "$SCRIPTS_ROOT/common/prelaunch.sh"
 
 # Resubmit THIS _research job on a fresh allocation: the sbatch line submit.sh
