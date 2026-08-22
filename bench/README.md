@@ -25,6 +25,9 @@ A clean bench (either one) also records the allocation into
 the verified pool: `INCLUDE_FILE=common/filter/dynamic_include.txt ./submit.sh
 launch/<exp>.sh` — opt-in, so ordinary submissions keep getting fresh nodes.
 
+The same gate runs in front of `_research`-launched jobs, without this repo's
+submit.sh in the chain: see [launch/research/README.md](../launch/research/README.md).
+
 ## EP dispatch benchmark details
 
 

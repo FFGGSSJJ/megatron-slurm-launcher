@@ -70,6 +70,10 @@ export WORLD_SIZE=${SLURM_NTASKS:-$(( ${SLURM_NNODES:-1} * 4 ))}
 # MPI and needs neither). Same values lib/common.sh derives later for training.
 export MASTER_ADDR=${MASTER_ADDR:-$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$(hostname)}" | head -n1)}
 export MASTER_PORT=${MASTER_PORT:-25678}
+# Slingshot, not IB: without this UCCL picks its verbs transport and finds no NIC.
+# lib/common.sh exports the same later, but only after the gate has run.
+export UCCL_EP_TRANSPORT=${UCCL_EP_TRANSPORT:-cxi}
+export UCCL_EP_CPU_TIMEOUT_SECS=${UCCL_EP_CPU_TIMEOUT_SECS:-6000}
 # Gate group = the training EP; EP=1 shards no experts, so gate 2-node groups instead.
 if [ "${EP:-1}" -gt 1 ]; then : "${NCCL_PREFLIGHT_EP:=$EP}"; else : "${NCCL_PREFLIGHT_EP:=8}"; fi
 
