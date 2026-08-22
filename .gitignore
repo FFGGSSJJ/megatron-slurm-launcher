@@ -1,3 +1,15 @@
 .secrets
 archive/
 .claude/
+core_*
+image/build_*.log
+image/build_*.err
+image/*.whl
+bench/logs/*
+!bench/logs/.gitkeep
+*/__pycache__/
+bench/logs/
+docs/
+tools/fig
+bench/iostorm/common/filter/dynamic_exclude.txt
+common/filter/dynamic_include.txt

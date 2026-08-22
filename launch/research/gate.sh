@@ -38,25 +38,21 @@ esac
 source "$SCRIPTS_ROOT/common/prelaunch.sh"
 
 # Resubmit THIS _research job on a fresh allocation: the sbatch line submit.sh
-# and maybe_auto_requeue build, with the merged exclude list last so it beats
-# the cluster's. --export=ALL carries the rest of the job env (AUTO_REQUEUE,
-# REQUEUE_COUNT, RESERVATION, recipe knobs), so a bounce keeps the chain intact.
+# and maybe_auto_requeue build. CLUSTER_SBATCH_FLAGS rides along untouched --
+# its --exclude names dynamic_exclude.txt, which the loop appended to seconds
+# ago, so the replacement re-reads the fresh list and needs no snapshot file
+# ($1, the merged list, is only for the submit.sh resubmitter, whose caller may
+# have been using a curated list instead). --export=ALL carries the rest of the
+# job env (AUTO_REQUEUE, REQUEUE_COUNT, RESERVATION, recipe knobs).
 preflight_resubmit_research() {
-	local merged="$1" tl f
-	local flags=()
-	# the cluster's own --exclude is dropped, not overridden: $merged already
-	# contains that list (preflight_listed_nodes reads this job's ExcNodeList).
-	for f in ${CLUSTER_SBATCH_FLAGS[@]+"${CLUSTER_SBATCH_FLAGS[@]}"}; do
-		[ "${f#--exclude}" = "$f" ] && flags+=("$f")
-	done
+	local tl
 	tl=$(scontrol show job "${SLURM_JOB_ID:-}" 2>/dev/null | sed -n 's/.*TimeLimit=\([^ ]*\).*/\1/p' | head -1)
 	sbatch \
 		--dependency=singleton \
 		--nodes="${SLURM_NNODES:-1}" \
 		--time="${REQUEUE_TIME:-${tl:-${DEFAULT_TIME:-10:00:00}}}" \
 		--job-name="${SLURM_JOB_NAME:-$SIZE-$RECIPE}" \
-		${flags[@]+"${flags[@]}"} \
-		--exclude="$merged" \
+		${CLUSTER_SBATCH_FLAGS[@]+"${CLUSTER_SBATCH_FLAGS[@]}"} \
 		${RESERVATION:+--reservation="$RESERVATION"} \
 		--export=ALL,SIZE="$SIZE",RECIPE="$RECIPE",CLUSTER="${CLUSTER:-alps3}",FRAMEWORK_DIR="$FRAMEWORK_DIR" \
 		"$FRAMEWORK_DIR/train.sbatch"
