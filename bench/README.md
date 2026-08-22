@@ -19,14 +19,93 @@ Knobs (see common/prelaunch.sh): `NCCL_PREFLIGHT`, `NCCL_PREFLIGHT_EP`,
 `NCCL_PREFLIGHT_SIZE_MB`, `NCCL_PREFLIGHT_ITERS`, `RUN_NCCL_TESTS_INSTALL=true`
 to force a rebuild; flag/spread/budget knobs are shared with `EP_PREFLIGHT_*`.
 
-A clean bench (either one) also records the allocation into
-`common/filter/dynamic_include.txt`, kept disjoint from `dynamic_exclude.txt`
-(exclusion wins; both are plain lists, pruned by hand). To restrict a submission
-to the include list: `INCLUDE_FILE=common/filter/dynamic_include.txt ./submit.sh
-launch/<exp>.sh` — opt-in, so ordinary submissions keep getting fresh nodes.
-
 The same gate runs in front of `_research`-launched jobs, without this repo's
 submit.sh in the chain: see [launch/research/README.md](../launch/research/README.md).
+
+## Include and exclude lists
+
+Two plain node lists in `common/filter/`, one nid per line, no timestamps and no
+annotations:
+
+    dynamic_exclude.txt   nodes a gate flagged
+    dynamic_include.txt   nodes a gate cleared
+
+Both are gitignored — per-checkout runtime state, not config — and on this
+machine the two checkouts (`myscripts`, and the `slurm-launcher` submodule inside
+`_research`) are symlinked to one copy, so the two launchers learn from each
+other.
+
+### Updates
+
+Both writes happen at the end of `preflight_auto_exclude`, once the picker has
+judged the allocation. Writing `E` for the exclude list, `I` for the include
+list, `A` for this allocation's nodes, `B` for the culprits, and `X` for what
+slurm says this job excluded (`scontrol` → `ExcNodeList`):
+
+| bench result | effect |
+| --- | --- |
+| clean (`preflight_record_include`) | `E` unchanged, `I ← I ∪ (A − E)` |
+| flagged (the culprit branch) | `E ← B ∪ X ∪ E`, then `I ← I − E` |
+
+`E` is a *union* write because slurm's `--exclude` takes ONE file: folding in
+what the job was already excluding keeps that file the whole exclusion set, so
+the resubmit needs no second list. Order matters — the exclude write happens
+first and the prune reads it back; reversed, the prune would use a stale `E` and
+miss the nodes just added.
+
+`E` only ever grows, bounded by `EP_PREFLIGHT_MAX_NODES`. Past that the loop
+stops resubmitting and `EP_PREFLIGHT_ON_EXHAUST` decides between training anyway
+(`run`, the default) and halting (`stop`). Shrinking is a human job: prune by
+hand as nodes heal. Neither file records *when* a node was added, so staleness is
+yours to manage.
+
+### Reads
+
+Deliberately asymmetric — exclusion is automatic, restriction is opt-in:
+
+| | exclude | include |
+| --- | --- | --- |
+| myscripts `submit.sh` | `--exclude=<file>`, always | `INCLUDE_FILE=…` → `--nodelist=…` |
+| `_research` `clusters/alps3.sh` | `--exclude=<file>` in `CLUSTER_SBATCH_FLAGS` | not consumed; manual `--nodelist` |
+
+`--exclude` takes a *filename* (slurm reads a file when the value contains a
+`/`), so the live list is re-read at every submission — the first one, every
+auto-requeue chain link, every gate resubmit — with no code change anywhere.
+`--nodelist` takes a comma-separated *list*, so `submit.sh` has to materialize
+it, and that is where the subtraction happens:
+
+```bash
+INCLUDE_FILE=common/filter/dynamic_include.txt ./submit.sh launch/<exp>.sh
+```
+
+`--nodelist` is a requirement, not a preference: slurm takes your `--nodes` out
+of that pool and queues if it cannot. Excluding a few dozen nodes out of a few
+thousand costs nothing; restricting to a few hundred can leave you waiting.
+Hence opt-in.
+
+### Why the two stay disjoint
+
+Each update preserves disjointness on its own: the clean path adds only `A − E`,
+and the flagged path recomputes `I` as `I − E`, which repairs the invariant
+rather than merely preserving it. So from an empty (or hand-curated disjoint)
+pair, every serial update leaves them disjoint.
+
+Concurrency is the hole. Neither path is atomic — both are read, compute, write,
+with no lock — so two gates finishing together can lose an update:
+
+    Y (flagged): grep -vxF -f E I > I.tmp      reads I
+    X (clean):   printf '%s\n' good >> I       appends
+    Y (flagged): mv I.tmp I                    X's append is gone
+
+Swap the last two and it is Y's prune that is lost, leaving a node in both files.
+Overlap is a symptom of that race, not an independent failure — and so is a node
+quietly disappearing from either list. Hand edits do the same thing for the same
+reason. There is also a window inside a single job, between the exclude write and
+the include prune, where a concurrent reader sees overlap.
+
+None of it reaches slurm. `submit.sh` does not trust the files: it recomputes
+`I − E` at submission time and falls back to `--exclude` alone if the result is
+empty. Disjointness on disk is hygiene; that subtraction is the guarantee.
 
 ## EP dispatch benchmark details
 
