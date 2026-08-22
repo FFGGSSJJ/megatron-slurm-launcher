@@ -1,0 +1,4 @@
+[submodule "bench/nccl-tests"]
+	path = bench/nccl-tests
+	url = https://github.com/NVIDIA/nccl-tests.git
+	shallow = true
