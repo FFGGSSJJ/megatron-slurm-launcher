@@ -28,9 +28,10 @@ submit.sh ──sbatch──► train.sbatch ──► gate.sh ──clean──
 The resubmit is the *same* `_research` job, not a wrapper: same `--job-name`
 (so `--dependency=singleton` queues it behind this allocation), same nodes/time,
 `--export=ALL` so `AUTO_REQUEUE`/`REQUEUE_COUNT`/`RESERVATION`/recipe knobs
-survive the bounce. Budgets are the usual ones (`EP_PREFLIGHT_MAX_RETRY`
-resubmits per campaign, `EP_PREFLIGHT_MAX_NODES` entries in the exclude list);
-`EP_PREFLIGHT_ON_EXHAUST=stop` halts instead of training on suspects.
+survive the bounce. The only bound is `EP_PREFLIGHT_MAX_NODES`, the size of
+the exclude list — bouncing is unlimited, since a bounce costs one allocation
+while an unbounded exclude list costs the cluster. `EP_PREFLIGHT_ON_EXHAUST=stop`
+halts instead of training on suspects once that cap is hit.
 
 ## Wiring it into `_research` (once)
 

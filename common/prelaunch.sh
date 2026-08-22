@@ -30,8 +30,8 @@
 # WITHOUT training. The singleton dependency queues the replacement until this
 # allocation is gone, so it re-benches a fresh allocation and either trains or
 # repeats. Two budgets stop a false positive from eating the cluster:
-# EP_PREFLIGHT_MAX_RETRY resubmits per campaign (any clean bench resets it) and
-# EP_PREFLIGHT_MAX_NODES dynamic entries in total. dynamic_exclude.txt is a
+# EP_PREFLIGHT_MAX_NODES caps dynamic_exclude.txt: once the exclusion set would
+# grow past it the loop stops bouncing. dynamic_exclude.txt is a
 # plain node list, never annotated -- prune it by hand when nodes heal; the
 # curated exclude lists are only read, never written.
 #
@@ -46,7 +46,6 @@
 : "${EP_PREFLIGHT_AUTO_EXCLUDE:=true}"
 : "${EP_PREFLIGHT_FLAG:=1.2}"          # a group flags at this multiple of the median group
 : "${EP_PREFLIGHT_SPREAD:=1.2}"        # blame ONE node only above this in-group spread
-: "${EP_PREFLIGHT_MAX_RETRY:=3}"       # auto-exclude resubmits per campaign
 : "${EP_PREFLIGHT_MAX_NODES:=128}"     # hard cap on dynamic_exclude.txt entries (counts seeded/absorbed ones too)
 : "${EP_PREFLIGHT_ON_EXHAUST:=run}"    # budget spent: run = train anyway, stop = halt chain
 : "${NCCL_PREFLIGHT:=true}"            # raw-NCCL a2a gate before the EP bench
@@ -252,8 +251,6 @@ preflight_auto_exclude() {
 	[ -r "$out" ] || return 0
 
 	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
-	local tries_file
-	tries_file="$(dirname "$out")/preflight-retries"
 
 	# A picker CRASH must not read as a clean bench: 3145713 trained on
 	# nid007260 because the host python (pre-3.8, no statistics.fmean) died and
@@ -275,24 +272,24 @@ preflight_auto_exclude() {
 	[ -n "$listed" ] && bad=$(printf '%s\n' "$bad" | grep -vxF -f <(printf '%s\n' "$listed")) || true
 
 	if [ -z "$bad" ]; then
-		echo 0 > "$tries_file"   # clean bench: the retry budget starts over
 		preflight_record_good_nodes
 		return 0
 	fi
 
-	local n_try=$(( $(cat "$tries_file" 2>/dev/null) + 1 ))
 	local n_dyn=0
 	[ -r "$dyn" ] && n_dyn=$(wc -l < "$dyn")
 	local n_bad=$(printf '%s\n' "$bad" | wc -l)
-	if (( n_try > EP_PREFLIGHT_MAX_RETRY || n_dyn + n_bad > EP_PREFLIGHT_MAX_NODES )); then
-		echo "[prelaunch] budget spent: retry $n_try/$EP_PREFLIGHT_MAX_RETRY, " \
-		     "dynamic $n_dyn+$n_bad/$EP_PREFLIGHT_MAX_NODES -- leaving these suspects in:" >&2
-		printf '%s\n' "$bad" | sed 's/^/  /' >&2
+	# The node budget is the only bound: a bounce costs one allocation, but what
+	# can actually eat the cluster is the exclude list growing without limit.
+	if (( n_dyn + n_bad > EP_PREFLIGHT_MAX_NODES )); then
+		echo "[prelaunch] budget spent: dynamic $n_dyn+$n_bad/$EP_PREFLIGHT_MAX_NODES" \
+		     "-- leaving these suspects in:"
+		printf '%s\n' "$bad" | sed 's/^/  /'
 		if [ "$EP_PREFLIGHT_ON_EXHAUST" = stop ]; then
-			echo "[prelaunch] EP_PREFLIGHT_ON_EXHAUST=stop -- halting the chain" >&2
+			echo "[prelaunch] EP_PREFLIGHT_ON_EXHAUST=stop -- halting the chain"
 			exit 1
 		fi
-		echo "[prelaunch] EP_PREFLIGHT_ON_EXHAUST=run -- training on them anyway" >&2
+		echo "[prelaunch] EP_PREFLIGHT_ON_EXHAUST=run -- training on them anyway"
 		return 0
 	fi
 
@@ -302,7 +299,6 @@ preflight_auto_exclude() {
 	{ printf '%s\n' "$bad"; preflight_listed_nodes; } \
 		| sed '/^[[:space:]]*$/d' | sort -u > "$dyn.tmp"
 	mv "$dyn.tmp" "$dyn"
-	echo "$n_try" > "$tries_file"
 
 	# A node vouched earlier can be flagged now; drop it from the include list so
 	# the two stay disjoint and exclusion keeps winning at submission time.
