@@ -735,7 +735,9 @@ fi
 # NOTE: per-rank Triton/inductor/torch-extension caches are set in $CACHE_ENV
 # above, inside PER_RANK_CMD — not here, where SLURM_PROCID is always 0.
 
-# Optionally bench the expert a2a on these exact nodes (EP_PREFLIGHT=true).
+# Gate the raw network first (NCCL_PREFLIGHT=true), then the UCCL a2a (EP_PREFLIGHT=true).
+# Either may auto-exclude nodes and exit to resubmit on a fresh allocation.
+prelaunch_nccl_a2a
 prelaunch_ep_bench
 
 if [ "$AUTO_JOB_REQUEUE" = true ]; then

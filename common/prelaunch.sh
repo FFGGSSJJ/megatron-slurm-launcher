@@ -17,6 +17,10 @@
 #   EP_PREFLIGHT_AUTO_EXCLUDE=false                   # flag in the log only, train anyway
 #   EP_PREFLIGHT_ON_EXHAUST=stop                      # halt the chain instead of training
 #
+# Before all that, NCCL_PREFLIGHT (default true) runs nccl-tests' alltoall_perf
+# on the same groups -- a hit there is the network itself, not UCCL.  It feeds
+# the same auto-exclude loop below; FLAG/SPREAD/budget knobs are shared.
+#
 # Auto-exclude loop: when the bench flags a group, the culprit nodes (see
 # ep_bench_report.py --pick-culprits) are appended to common/filter/
 # dynamic_exclude.txt, $0 is resubmitted THROUGH submit.sh (reservation,
@@ -28,6 +32,11 @@
 # EP_PREFLIGHT_MAX_NODES dynamic entries in total. dynamic_exclude.txt is a
 # plain node list, never annotated -- prune it by hand when nodes heal; the
 # curated exclude lists are only read, never written.
+#
+# Clean benches do the mirror write: the allocation lands in common/filter/
+# dynamic_include.txt, kept disjoint from the excludes (exclusion wins).  Pin a
+# submission to the verified pool with INCLUDE_FILE=common/filter/
+# dynamic_include.txt (submit.sh; opt-in, exclusion wins).
 : "${EP_PREFLIGHT:=true}"
 : "${EP_PREFLIGHT_EP:=}"   # empty = follow the training $EP
 : "${EP_PREFLIGHT_ITERS:=20}"
@@ -38,6 +47,12 @@
 : "${EP_PREFLIGHT_MAX_RETRY:=3}"       # auto-exclude resubmits per campaign
 : "${EP_PREFLIGHT_MAX_NODES:=32}"       # hard cap on dynamic_exclude.txt entries
 : "${EP_PREFLIGHT_ON_EXHAUST:=run}"    # budget spent: run = train anyway, stop = halt chain
+: "${NCCL_PREFLIGHT:=true}"            # raw-NCCL a2a gate before the EP bench
+: "${NCCL_PREFLIGHT_EP:=}"             # empty = follow the training $EP
+: "${NCCL_PREFLIGHT_SIZE_MB:=64}"      # a2a bytes per rank (single fixed size)
+: "${NCCL_PREFLIGHT_ITERS:=20}"
+: "${RUN_NCCL_TESTS_INSTALL:=false}"   # true → force rebuild of bench/nccl-tests
+: "${NCCL_TESTS_GENCODE:=-gencode=arch=compute_90,code=sm_90}"  # GH200 = Hopper (sm_90)
 
 prelaunch_ep_bench() {
 	[ "$EP_PREFLIGHT" = true ] || return 0
@@ -87,6 +102,111 @@ prelaunch_ep_bench() {
 	return 0
 }
 
+# Build the nccl-tests submodule in-container, once (mirrors install_uccl in
+# common/uccl.sh): built only when alltoall_perf is missing, RUN_NCCL_TESTS_INSTALL
+# forces a rebuild.  Same image as training so the binary links the NCCL it will run.
+install_nccl_tests() {
+	local bin="$NCCL_TESTS_DIR/build/alltoall_perf"
+	if [ -x "$bin" ] && [ "$RUN_NCCL_TESTS_INSTALL" != true ]; then
+		return 0
+	fi
+	if [ ! -d "$NCCL_TESTS_DIR/src" ]; then
+		echo "[prelaunch] no $NCCL_TESTS_DIR/src -- submodule missing?" >&2
+		echo "[prelaunch]   fix with: git submodule update --init bench/nccl-tests" >&2
+		return 1
+	fi
+	echo "[$(date --iso-8601=seconds)] Building nccl-tests in $NCCL_TESTS_DIR"
+	srun --nodes=1 --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-72}" --cpu-bind=none \
+		--mpi=pmix --network=disable_rdzv_get --export=ALL \
+		--environment="$IMAGE_ENV" \
+		bash -c "
+			set -euo pipefail
+			nccl_home=''
+			for d in /usr /usr/local/nccl /opt/nccl; do
+				[ -e \"\${d}/include/nccl.h\" ] && nccl_home=\"\${d}\"
+			done
+			mpi_home=''
+			for d in /opt/hpcx/ompi /usr/local/mpi; do
+				[ -e \"\${d}/include/mpi.h\" ] && [ -e \"\${d}/lib/libmpi.so\" ] && mpi_home=\"\${d}\"
+			done
+			if [ -z \"\$mpi_home\" ]; then
+				h=\$(find /opt /usr/local -maxdepth 5 -name mpi.h 2>/dev/null | head -n 1)
+				[ -n \"\$h\" ] && mpi_home=\$(dirname \$(dirname \"\$h\"))
+			fi
+			echo \"NCCL_HOME=\${nccl_home:-NOT FOUND}  MPI_HOME=\${mpi_home:-NOT FOUND}\"
+			[ -n \"\$mpi_home\" ] || { echo 'no MPI dev files in the image -- cannot build MPI=1' >&2; exit 1; }
+			# stale objects from a differently-flagged build would be reused: start clean
+			rm -rf '$NCCL_TESTS_DIR/build'
+			make -C '$NCCL_TESTS_DIR/src' -j\$(nproc) MPI=1 NCCL_HOME=\"\$nccl_home\" MPI_HOME=\"\$mpi_home\" \
+				CUDA_HOME=/usr/local/cuda NVCC_GENCODE='$NCCL_TESTS_GENCODE'
+		"
+}
+
+# Raw-NCCL all-to-all gate: same groups, same JSON schema, same auto-exclude
+# loop as prelaunch_ep_bench -- but with nccl-tests' alltoall_perf, so a flagged
+# group indicts the network rather than UCCL.  Runs first; a clean pass still
+# leaves the UCCL bench to run afterwards.
+prelaunch_nccl_a2a() {
+	[ "$NCCL_PREFLIGHT" = true ] || return 0
+
+	local bench="$SCRIPTS_ROOT/bench/nccl_a2a_bench.py"
+	if [ ! -r "$bench" ]; then
+		echo "[prelaunch] no $bench -- skipping NCCL a2a pre-flight" >&2
+		return 0
+	fi
+	if [ -z "${SRUN_LAUNCH:-}" ]; then
+		echo "[prelaunch] SRUN_LAUNCH unset -- call after train.sh defines it" >&2
+		return 0
+	fi
+	if [ "${ETP:-1}" != 1 ]; then
+		echo "[prelaunch] ETP=$ETP: groups stride by ETP but the bench cuts consecutive" >&2
+		echo "[prelaunch]   nodes -- it would test the wrong sets. Skipping." >&2
+		return 0
+	fi
+
+	local ep="${NCCL_PREFLIGHT_EP:-${EP:-}}"
+	if [ -z "$ep" ] || [ $((${WORLD_SIZE:-0} % ep)) -ne 0 ]; then
+		echo "[prelaunch] WORLD_SIZE=${WORLD_SIZE:-unset} not a multiple of ep=${ep:-unset} -- skipping" >&2
+		return 0
+	fi
+
+	install_nccl_tests || {
+		echo "[prelaunch] nccl-tests build failed -- skipping NCCL a2a pre-flight" >&2
+		return 0
+	}
+
+	local dir="$SCRIPTS_ROOT/bench/logs/nccl-a2a-$((ep / ${SLURM_GPUS_PER_NODE:-4}))n"
+	mkdir -p "$dir"
+	local out="$dir/nccl-a2a-$SLURM_JOB_ID.json"
+
+	echo "[prelaunch] NCCL a2a pre-flight: ep=$ep size=${NCCL_PREFLIGHT_SIZE_MB}MB iters=$NCCL_PREFLIGHT_ITERS -> $out"
+	python3 "$bench" --ep "$ep" --size-mb "$NCCL_PREFLIGHT_SIZE_MB" \
+		--iters "$NCCL_PREFLIGHT_ITERS" --warmup 5 --out "$out" \
+		--bin "$NCCL_TESTS_DIR/build/alltoall_perf" --srun "$SRUN_LAUNCH" \
+		|| echo "[prelaunch] NCCL a2a pre-flight failed -- continuing to the EP bench" >&2
+
+	preflight_auto_exclude "$out"
+	return 0
+}
+
+# The mirror of the exclude loop: a clean bench vouches for every node of this
+# allocation, so remember them in dynamic_include.txt (plain list, prune by hand
+# when nodes sicken -- same staleness contract as dynamic_exclude.txt).
+preflight_record_good_nodes() {
+	local inc="$SCRIPTS_ROOT/common/filter/dynamic_include.txt"
+	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
+	[ -n "${SLURM_JOB_NODELIST:-}" ] || return 0
+	local good
+	good=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null) || return 0
+	[ -n "$good" ] || return 0
+	[ -r "$dyn" ] && good=$(printf '%s\n' "$good" | grep -vxF -f "$dyn" || true)
+	[ -n "$good" ] || return 0
+	printf '%s\n' "$good" >> "$inc"
+	sort -u -o "$inc" "$inc"
+	echo "[prelaunch] clean bench vouches for $(printf '%s\n' "$good" | wc -l) node(s):" \
+	     "$inc now holds $(wc -l < "$inc")"
+}
+
 # Nodes the CURRENT job actually excludes, plus the dynamic list. Slurm's own
 # record is the ground truth: it folds in the launch script's #SBATCH header,
 # submit.sh's --exclude file and anything given on the command line -- grepping
@@ -133,6 +253,7 @@ preflight_auto_exclude() {
 
 	if [ -z "$bad" ]; then
 		echo 0 > "$tries_file"   # clean bench: the retry budget starts over
+		preflight_record_good_nodes
 		return 0
 	fi
 
@@ -156,12 +277,20 @@ preflight_auto_exclude() {
 	sort -u -o "$dyn" "$dyn"
 	echo "$n_try" > "$tries_file"
 
+	# A node vouched earlier can be flagged now; drop it from the include list so
+	# the two stay disjoint and exclusion keeps winning at submission time.
+	local inc="$SCRIPTS_ROOT/common/filter/dynamic_include.txt"
+	if [ -r "$inc" ]; then
+		grep -vxF -f <(printf '%s\n' "$bad") "$inc" > "$inc.tmp" || true
+		mv "$inc.tmp" "$inc"
+	fi
+
 	# Resubmit through submit.sh, never bare sbatch: the reservation, the
 	# derived --job-name (what --dependency=singleton matches on) and the dated
 	# --output/--error all live there, not in the launch script's headers. The
-	# merged exclude rides along as a file -- same format as its own lists. A
-	# pinned NODELIST_FILE is deliberately NOT inherited: minus the excluded
-	# node it could never be satisfied.
+	# merged exclude rides along as a file -- same format as its own lists. An
+	# INCLUDE_FILE pin is deliberately NOT inherited either: the replacement
+	# must be free to land on any fresh allocation.
 	local merged submit="$SCRIPTS_ROOT/submit.sh"
 	merged="$(dirname "$out")/exclude-merged.txt"
 	preflight_listed_nodes > "$merged"

@@ -49,6 +49,9 @@
 # — train.sh keeps those on node-local /tmp, per job.)
 : "${JIT_CACHE_BASE:=/iopsstor/scratch/cscs/gfu/.cache}"
 
+# -- nccl-tests (raw NCCL perf binaries; bench/nccl-tests submodule, built in-tree) --
+: "${NCCL_TESTS_DIR:=$SCRIPTS_ROOT/bench/nccl-tests}"  # binaries land in $NCCL_TESTS_DIR/build after install_nccl_tests
+
 # -- UCCL (MoE flex/DeepEP dispatcher; built once from source, then reused) --
 : "${UCCL_SOURCE_DIR:=/capstor/scratch/cscs/gfu/frameworks/uccl-sai}"  # uccl checkout (override to your own clone)
 : "${UCCL_INSTALL_BASE:=$SCRATCH_DIR/uccl_python}"       # shared install lands in $UCCL_INSTALL_BASE/default

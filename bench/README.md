@@ -1,5 +1,33 @@
 # EP dispatch benchmark: UCCL vs NCCL at EP8
 
+## nccl-tests all-to-all pre-flight (raw network gate)
+
+`bench/nccl-tests` is a shallow submodule of [NVIDIA/nccl-tests](https://github.com/NVIDIA/nccl-tests);
+after `install_nccl_tests` (common/prelaunch.sh, runs automatically when
+`build/alltoall_perf` is missing) the binaries live in `bench/nccl-tests/build/`.
+
+`NCCL_PREFLIGHT=true` (default) makes every launch run `bench/nccl_a2a_bench.py`
+*before* the UCCL EP bench: it cuts the allocation into the same consecutive-node
+EP groups, runs one `alltoall_perf` per group as overlapping srun steps, and
+writes `bench/logs/nccl-a2a-<nodes-per-group>n/nccl-a2a-<jobid>.json` in the
+picker's schema — so a flagged group feeds the exact same auto-exclude /
+resubmit loop (`dynamic_exclude.txt`, budgets, `submit.sh`) as the EP bench.
+The attribution split: slow here → the network itself; clean here but slow in
+the EP bench → UCCL.
+
+Knobs (see common/prelaunch.sh): `NCCL_PREFLIGHT`, `NCCL_PREFLIGHT_EP`,
+`NCCL_PREFLIGHT_SIZE_MB`, `NCCL_PREFLIGHT_ITERS`, `RUN_NCCL_TESTS_INSTALL=true`
+to force a rebuild; flag/spread/budget knobs are shared with `EP_PREFLIGHT_*`.
+
+A clean bench (either one) also records the allocation into
+`common/filter/dynamic_include.txt`, kept disjoint from `dynamic_exclude.txt`
+(exclusion wins; both are plain lists, pruned by hand). To pin a submission to
+the verified pool: `INCLUDE_FILE=common/filter/dynamic_include.txt ./submit.sh
+launch/<exp>.sh` — opt-in, so ordinary submissions keep getting fresh nodes.
+
+## EP dispatch benchmark details
+
+
 `ep_dispatch_bench.py --backend {uccl,nccl}` drives the same routing two ways:
 
 - **uccl** — DeepEP/UCCL internode `dispatch`/`combine`, the path training uses.
