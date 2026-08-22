@@ -23,9 +23,10 @@
 #
 # Auto-exclude loop: when the bench flags a group, the culprit nodes (see
 # ep_bench_report.py --pick-culprits) are appended to common/filter/
-# dynamic_exclude.txt, $0 is resubmitted THROUGH submit.sh (reservation,
-# job-name, log paths) with the merged exclude list, and this job exits WITHOUT
-# training. The singleton dependency queues the replacement until this
+# dynamic_exclude.txt, the job is resubmitted with the merged exclude list by
+# $PREFLIGHT_RESUBMIT (submit.sh by default -- reservation, job-name, log paths;
+# launch/research/gate.sh swaps in the _research launcher), and this job exits
+# WITHOUT training. The singleton dependency queues the replacement until this
 # allocation is gone, so it re-benches a fresh allocation and either trains or
 # repeats. Two budgets stop a false positive from eating the cluster:
 # EP_PREFLIGHT_MAX_RETRY resubmits per campaign (any clean bench resets it) and
@@ -45,7 +46,7 @@
 : "${EP_PREFLIGHT_FLAG:=1.2}"          # a group flags at this multiple of the median group
 : "${EP_PREFLIGHT_SPREAD:=1.2}"        # blame ONE node only above this in-group spread
 : "${EP_PREFLIGHT_MAX_RETRY:=3}"       # auto-exclude resubmits per campaign
-: "${EP_PREFLIGHT_MAX_NODES:=32}"       # hard cap on dynamic_exclude.txt entries
+: "${EP_PREFLIGHT_MAX_NODES:=64}"      # hard cap on dynamic_exclude.txt entries (counts hand-seeded ones too)
 : "${EP_PREFLIGHT_ON_EXHAUST:=run}"    # budget spent: run = train anyway, stop = halt chain
 : "${NCCL_PREFLIGHT:=true}"            # raw-NCCL a2a gate before the EP bench
 : "${NCCL_PREFLIGHT_EP:=}"             # empty = follow the training $EP
@@ -53,6 +54,7 @@
 : "${NCCL_PREFLIGHT_ITERS:=20}"
 : "${RUN_NCCL_TESTS_INSTALL:=false}"   # true → force rebuild of bench/nccl-tests
 : "${NCCL_TESTS_GENCODE:=-gencode=arch=compute_90,code=sm_90}"  # GH200 = Hopper (sm_90)
+: "${PREFLIGHT_RESUBMIT:=preflight_resubmit_submit_sh}"  # function that hands the job back when the gate flags
 
 prelaunch_ep_bench() {
 	[ "$EP_PREFLIGHT" = true ] || return 0
@@ -221,6 +223,23 @@ preflight_listed_nodes() {
 	} | sed '/^[[:space:]]*$/d' | sort -u
 }
 
+# Default resubmitter (PREFLIGHT_RESUBMIT): hand $0 back to submit.sh, never to
+# bare sbatch -- the reservation, the derived --job-name (what
+# --dependency=singleton matches on) and the dated --output/--error all live
+# there, not in the launch script's headers. A launcher that submits its own way
+# (see launch/research/gate.sh) sets PREFLIGHT_RESUBMIT to its own function.
+preflight_resubmit_submit_sh() {
+	local merged="$1" submit="$SCRIPTS_ROOT/submit.sh"
+	if [ -r "$submit" ]; then
+		# keep the submitter's own EXTRA_SBATCH_ARGS (e.g. --nodes) across the resubmit
+		EXCLUDE_FILE="$merged" EXTRA_SBATCH_ARGS="--dependency=singleton ${EXTRA_SBATCH_ARGS:-}" \
+			bash "$submit" "$0"
+	else
+		echo "[prelaunch] no $submit -- falling back to bare sbatch (no reservation!)" >&2
+		sbatch --dependency=singleton --exclude="$(paste -sd, - "$merged")" "$0"
+	fi
+}
+
 # The loop half of the pre-flight: pick culprit nodes from this job's bench,
 # remember them, and hand the allocation back for a clean one.
 preflight_auto_exclude() {
@@ -285,25 +304,16 @@ preflight_auto_exclude() {
 		mv "$inc.tmp" "$inc"
 	fi
 
-	# Resubmit through submit.sh, never bare sbatch: the reservation, the
-	# derived --job-name (what --dependency=singleton matches on) and the dated
-	# --output/--error all live there, not in the launch script's headers. The
-	# merged exclude rides along as a file -- same format as its own lists. An
-	# INCLUDE_FILE pin is deliberately NOT inherited either: the replacement
-	# must be free to land on any fresh allocation.
-	local merged submit="$SCRIPTS_ROOT/submit.sh"
+	# Resubmit, never train on this allocation. The merged exclude rides along
+	# as a file -- same format as the lists here. An INCLUDE_FILE pin is
+	# deliberately NOT inherited: the replacement must be free to land anywhere.
+	local merged
 	merged="$(dirname "$out")/exclude-merged.txt"
 	preflight_listed_nodes > "$merged"
 	echo "[prelaunch] $(date '+%F %T') auto-exclude -> $dyn (+$n_bad):"
 	printf '%s\n' "$bad" | sed 's/^/  /'
-	echo "[prelaunch] resubmitting via $submit (exclude file $merged,"
+	echo "[prelaunch] resubmitting via $PREFLIGHT_RESUBMIT (exclude file $merged,"
 	echo "[prelaunch]   $(wc -l < "$merged") nodes), skipping training on this allocation"
-	if [ -r "$submit" ]; then
-		EXCLUDE_FILE="$merged" EXTRA_SBATCH_ARGS="--dependency=singleton" \
-			bash "$submit" "$0"
-	else
-		echo "[prelaunch] no $submit -- falling back to bare sbatch (no reservation!)" >&2
-		sbatch --dependency=singleton --exclude="$(paste -sd, - "$merged")" "$0"
-	fi
+	"$PREFLIGHT_RESUBMIT" "$merged"
 	exit 0   # ends the batch script: no training, and train.sh's own requeue is skipped
 }
