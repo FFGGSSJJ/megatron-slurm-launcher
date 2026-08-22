@@ -35,10 +35,10 @@
 # plain node list, never annotated -- prune it by hand when nodes heal; the
 # curated exclude lists are only read, never written.
 #
-# Clean benches do the mirror write: the allocation lands in common/filter/
-# dynamic_include.txt, kept disjoint from the excludes (exclusion wins).  Pin a
-# submission to the verified pool with INCLUDE_FILE=common/filter/
-# dynamic_include.txt (submit.sh; opt-in, exclusion wins).
+# Clean benches do the mirror write: the allocation is added to common/filter/
+# dynamic_include.txt, kept disjoint from the exclude list (exclusion wins).
+# Restrict a submission to the include list with INCLUDE_FILE=common/filter/
+# dynamic_include.txt (submit.sh; opt-in, exclusion still wins).
 : "${EP_PREFLIGHT:=true}"
 : "${EP_PREFLIGHT_EP:=}"   # empty = follow the training $EP
 : "${EP_PREFLIGHT_ITERS:=20}"
@@ -191,10 +191,10 @@ prelaunch_nccl_a2a() {
 	return 0
 }
 
-# The mirror of the exclude loop: a clean bench vouches for every node of this
-# allocation, so remember them in dynamic_include.txt (plain list, prune by hand
-# when nodes sicken -- same staleness contract as dynamic_exclude.txt).
-preflight_record_good_nodes() {
+# The mirror of the exclude loop: a clean bench clears every node of this
+# allocation, so add them to dynamic_include.txt (plain list, prune by hand when
+# nodes sicken -- same staleness contract as dynamic_exclude.txt).
+preflight_record_include() {
 	local inc="$SCRIPTS_ROOT/common/filter/dynamic_include.txt"
 	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
 	[ -n "${SLURM_JOB_NODELIST:-}" ] || return 0
@@ -205,8 +205,8 @@ preflight_record_good_nodes() {
 	[ -n "$good" ] || return 0
 	printf '%s\n' "$good" >> "$inc"
 	sort -u -o "$inc" "$inc"
-	echo "[prelaunch] clean bench vouches for $(printf '%s\n' "$good" | wc -l) node(s):" \
-	     "$inc now holds $(wc -l < "$inc")"
+	echo "[prelaunch] clean bench: +$(printf '%s\n' "$good" | wc -l) node(s) to the" \
+	     "include list ($inc now holds $(wc -l < "$inc"))"
 }
 
 # Nodes the CURRENT job actually excludes, plus the dynamic list. Slurm's own
@@ -272,7 +272,7 @@ preflight_auto_exclude() {
 	[ -n "$listed" ] && bad=$(printf '%s\n' "$bad" | grep -vxF -f <(printf '%s\n' "$listed")) || true
 
 	if [ -z "$bad" ]; then
-		preflight_record_good_nodes
+		preflight_record_include
 		return 0
 	fi
 
@@ -300,7 +300,7 @@ preflight_auto_exclude() {
 		| sed '/^[[:space:]]*$/d' | sort -u > "$dyn.tmp"
 	mv "$dyn.tmp" "$dyn"
 
-	# A node vouched earlier can be flagged now; drop it from the include list so
+	# A node included earlier can be flagged now; drop it from the include list so
 	# the two stay disjoint and exclusion keeps winning at submission time.
 	# Pruned against the whole list, not just $bad: the write above is a union,
 	# so $dyn can also absorb nodes this job excluded by other means.
@@ -310,7 +310,7 @@ preflight_auto_exclude() {
 		mv "$inc.tmp" "$inc"
 	fi
 
-	# Resubmit, never train on this allocation. An INCLUDE_FILE pin is
+	# Resubmit, never train on this allocation. An INCLUDE_FILE restriction is
 	# deliberately NOT inherited: the replacement must be free to land anywhere.
 	echo "[prelaunch] $(date '+%F %T') auto-exclude -> $dyn (+$n_bad):"
 	printf '%s\n' "$bad" | sed 's/^/  /'

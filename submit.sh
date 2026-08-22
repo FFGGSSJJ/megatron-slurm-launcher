@@ -14,9 +14,9 @@ if [[ -z "$MODEL_ENV" ]]; then
 fi
 if [[ -n "$MODEL_ENV" && -f "$SCRIPTS_ROOT/models/${MODEL_ENV}.env" ]]; then
     source "$SCRIPTS_ROOT/models/${MODEL_ENV}.env"
-    JOB_NAME="$MODEL_NAME"
+    JOB_NAME=${JOB_NAME:-$MODEL_NAME}
 else
-    JOB_NAME="${MODEL_ENV:-unknown}"
+    JOB_NAME=${JOB_NAME:-${MODEL_ENV:-unknown}}
 fi
 
 DATE=$(date +%Y-%m-%d)
@@ -33,12 +33,24 @@ read -ra _extra_sbatch_args <<< "${EXTRA_SBATCH_ARGS:-}"
 
 # Exclude list = what the pre-flight auto-exclude loop has learned, nothing
 # else. Setting EXCLUDE_FILE overrides it (prelaunch.sh passes its own merged
-# list); NODELIST_FILE still takes precedence when set.
+# list). INCLUDE_FILE opts in to restricting the allocation to the pre-flight
+# include list (common/filter/dynamic_include.txt); exclusion still wins: the
+# requested set is the include list minus every excluded node.
 EXCLUDE_FILE="${EXCLUDE_FILE:-$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt}"
-NODELIST_FILE="${NODELIST_FILE:-}"
+INCLUDE_FILE="${INCLUDE_FILE:-}"
 
-if [[ -n "$NODELIST_FILE" ]]; then
-    _node_filter=(--nodelist="$NODELIST_FILE")
+if [[ -n "$INCLUDE_FILE" ]]; then
+    _inc=$(sed '/^[[:space:]]*$/d' "$INCLUDE_FILE" 2>/dev/null)
+    if [[ -r "$EXCLUDE_FILE" ]]; then
+        _inc=$(printf '%s\n' "$_inc" | grep -vxF -f "$EXCLUDE_FILE" || true)
+    fi
+    _inc=$(printf '%s\n' "$_inc" | sed '/^[[:space:]]*$/d' | paste -sd, -)
+    if [[ -n "$_inc" ]]; then
+        _node_filter=(--nodelist="$_inc")
+    else
+        echo "INCLUDE_FILE fully excluded -- falling back to --exclude only" >&2
+        _node_filter=(--exclude="$EXCLUDE_FILE")
+    fi
 else
     _node_filter=(--exclude="$EXCLUDE_FILE")
 fi

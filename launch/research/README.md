@@ -11,7 +11,7 @@ submodule and contributes two things:
   allocation's all-to-all (`bench/nccl_a2a_bench.py` over the vendored
   nccl-tests) and either falls through to training or hands the allocation back.
 * **the node lists** — `common/filter/dynamic_exclude.txt` (culprits the gate
-  found) and `common/filter/dynamic_include.txt` (allocations it vouched for).
+  found) and `common/filter/dynamic_include.txt` (allocations it cleared).
   `clusters/<cluster>.sh` points `--exclude` at the first, so every submission —
   the first one, each auto-requeue chain link, each gate resubmit — reads the
   live list.
@@ -75,7 +75,7 @@ fi
 Every job keeps the launcher current: an empty submodule dir (fresh `_research`
 clone, no `--init`) self-heals instead of silently skipping the gate, and an
 existing one fast-forwards to the remote tip, so a gate fix or a node-list update
-reaches the next job without bumping the pin. `fetch origin HEAD` + `merge`
+reaches the next job without updating the recorded submodule commit. `fetch origin HEAD` + `merge`
 rather than `pull`, because `submodule update` leaves a detached HEAD where a
 bare `fetch` marks every ref not-for-merge and the merge silently no-ops.
 `--ff-only` means local edits stop the update rather than being clobbered, and

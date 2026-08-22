@@ -21,8 +21,8 @@ to force a rebuild; flag/spread/budget knobs are shared with `EP_PREFLIGHT_*`.
 
 A clean bench (either one) also records the allocation into
 `common/filter/dynamic_include.txt`, kept disjoint from `dynamic_exclude.txt`
-(exclusion wins; both are plain lists, pruned by hand). To pin a submission to
-the verified pool: `INCLUDE_FILE=common/filter/dynamic_include.txt ./submit.sh
+(exclusion wins; both are plain lists, pruned by hand). To restrict a submission
+to the include list: `INCLUDE_FILE=common/filter/dynamic_include.txt ./submit.sh
 launch/<exp>.sh` — opt-in, so ordinary submissions keep getting fresh nodes.
 
 The same gate runs in front of `_research`-launched jobs, without this repo's
