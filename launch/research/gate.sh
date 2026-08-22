@@ -66,7 +66,10 @@ preflight_resubmit_research() {
 # the size file's own (EP=${EP:-4}) must keep winning.
 export SRUN_LAUNCH="srun --cpus-per-task ${SLURM_CPUS_PER_TASK:-72} --mpi=${SRUN_MPI:-pmix} --distribution=block:block ${SRUN_EXTRA_ARGS[*]-} --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
 export WORLD_SIZE=${SLURM_NTASKS:-$(( ${SLURM_NNODES:-1} * 4 ))}
-MASTER_PORT=${MASTER_PORT:-25678}
+# torch.distributed rendezvous for the UCCL bench (the NCCL gate bootstraps over
+# MPI and needs neither). Same values lib/common.sh derives later for training.
+export MASTER_ADDR=${MASTER_ADDR:-$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$(hostname)}" | head -n1)}
+export MASTER_PORT=${MASTER_PORT:-25678}
 # Gate group = the training EP; EP=1 shards no experts, so gate 2-node groups instead.
 if [ "${EP:-1}" -gt 1 ]; then : "${NCCL_PREFLIGHT_EP:=$EP}"; else : "${NCCL_PREFLIGHT_EP:=8}"; fi
 
