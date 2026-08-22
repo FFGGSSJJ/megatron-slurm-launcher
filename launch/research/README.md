@@ -17,12 +17,12 @@ submodule and contributes two things:
   live list.
 
 ```
-submit.sh ──sbatch──► train.sbatch ──► gate.sh -- if clean --> srun training
- (_research)           (_research)     (slurm-launcher)         (_research)
-                           ^               |
-                           |       if flagged: update exclude node list
-                           |               |
-                        resubmit <---------+
+submit.sh --> train.sbatch -----> gate.sh ----- if clean --> srun training
+(_research)   (_research)     (slurm-launcher)                 (_research)
+                  ^                 |
+                  |       if flagged: update exclude node list
+                  |                 |
+                 resubmit <---------+
 ```
 
 The resubmit is the *same* `_research` job, not a wrapper: same `--job-name`
