@@ -69,12 +69,34 @@ if [ "$ATTENTION_TYPE" = "swa" ]; then : "${ROPE_BASE:=$ROTARY_BASE}"; fi
 : "${NORM_EPSILON:=1e-6}"               # Megatron's own default is 1e-5
 : "${QK_LAYERNORM:=false}"              # --qk-layernorm
 
+# -- Embedding scaling --
+# --scale-embeddings-by-sqrt-hidden multiplies the embedding output by
+# sqrt(HIDDEN_SIZE) (fixed, non-learnable, fwd + bwd). It only makes sense
+# paired with INIT_METHOD_STD = 1/sqrt(HIDDEN_SIZE), which is what puts the RMS
+# entering the network at ~1. Off by default (Megatron's own default); the
+# _research ladder turns it on for every rung.
+: "${SCALE_EMBEDDINGS_BY_SQRT_HIDDEN:=false}"
+
 # -- Attention head grouping --
 # The gqa branch below emits --group-query-attention itself. The swa/kda branches
 # do NOT, and without it Megatron ignores --num-query-groups entirely and falls
 # back to num_query_groups = num_attention_heads (full MHA). Set this true on a
 # swa/kda model that is meant to be GQA.
 : "${USE_GROUP_QUERY_ATTENTION:=false}"
+
+# -- Attention output gates (hybrid linear/softmax models) --
+# --attention-output-gate fuses a Q-sized gate block into linear_qkv, so it
+# gates the SOFTMAX layers only (the KDA layers carry their own gate). It is
+# incompatible with `qkv` in RECOMPUTE_MODULES (Megatron asserts).
+#
+# --linear-attention-safe-output-gate is the Kimi-K3/FlashKDA bounded decay
+# gate on the LINEAR layers; it is a train-time choice that FlashKDA inference
+# then requires, so it cannot be turned on after the fact. Emitted by the kda
+# branch below.
+#
+# Both restate Megatron's own defaults when false, so they cost nothing off.
+: "${ATTENTION_OUTPUT_GATE:=false}"
+: "${LINEAR_ATTENTION_SAFE_OUTPUT_GATE:=false}"
 
 # -- MoE router (extra knobs) --
 : "${MOE_ROUTER_TOPK_SCALING_FACTOR:=}"  # empty = leave at Megatron's default (unset)
@@ -157,6 +179,10 @@ if [ "$QK_LAYERNORM" = true ]; then
 	NETWORK_SIZE_ARGS+=(--qk-layernorm)
 fi
 
+if [ "$ATTENTION_OUTPUT_GATE" = true ]; then
+	NETWORK_SIZE_ARGS+=(--attention-output-gate)
+fi
+
 # Explicit vocab size (otherwise derived from the tokenizer)
 if [ -n "$VOCAB_SIZE" ]; then
 	NETWORK_SIZE_ARGS+=(--vocab-size $VOCAB_SIZE)
@@ -178,10 +204,11 @@ if [ "$NORMALIZATION" == "sandwich-norm" ]; then
 	NETWORK_SIZE_ARGS+=(--sandwich-norm)
 fi
 
-# Scaling of embeddings and residuals
-# NETWORK_SIZE_ARGS+=(
-# 	--scale-embeddings-by-sqrt-hidden
-# )
+# Scaling of embeddings. (The residual counterpart, --residual-output-scaling,
+# is emitted by the md_decoupling recipe.)
+if [ "$SCALE_EMBEDDINGS_BY_SQRT_HIDDEN" = true ]; then
+	NETWORK_SIZE_ARGS+=(--scale-embeddings-by-sqrt-hidden)
+fi
 
 # Attention type: GQA vs MLA. MLA_ARGS is empty for GQA so it expands to nothing.
 MLA_ARGS=()
@@ -204,6 +231,9 @@ if [ "$ATTENTION_TYPE" == "mla" ]; then
 elif [ "$ATTENTION_TYPE" == "kda" ]; then
 	if [ "$USE_GROUP_QUERY_ATTENTION" = true ]; then
 		NETWORK_SIZE_ARGS+=(--group-query-attention)
+	fi
+	if [ "$LINEAR_ATTENTION_SAFE_OUTPUT_GATE" = true ]; then
+		NETWORK_SIZE_ARGS+=(--linear-attention-safe-output-gate)
 	fi
 	NETWORK_SIZE_ARGS+=(
 		--experimental-attention-variant kda

@@ -7,6 +7,10 @@
 #                    LR schedule, init, tokenizer, MoE model/router args.
 #   engine.sh        parallelism & performance: TP/PP/EP/ETP/CP + VPP, MoE perf
 #                    optimizations (dispatcher, offloading, fp8 kernels), recompute.
+#   warmup-kda.sh    fused-KDA Triton kernel archive: before the training
+#                    srun, run a short warm-up pass ON A NODE SUBSET of this
+#                    job's own allocation when the archive is missing/thin,
+#                    then seed every node from it and gate the launch.
 #   train.sh (this)  glue: model env, datasets, naming/dirs, logging/checkpoint
 #                    args, env, wandb, profiler, compute-env snapshot, srun.
 #
@@ -123,21 +127,44 @@ fi
 : "${CREATE_ATTENTION_MASK:=true}"
 : "${PACKING_STRATEGY:=}"               # empty = Megatron default (greedy) | bfd
 
+# --dataloader-inter-document-masking returns cu_seqlens marking the document
+# boundaries inside each packed sample, so attention is restricted to one
+# document. This is the packing-era replacement for CROSS_DOC_ATTENTION's
+# reset-position-ids/reset-attention-mask trio; Megatron force-clears
+# create_attention_mask_in_dataloader when it is on, and it rejects CP > 1.
+: "${INTER_DOCUMENT_MASKING:=false}"
+
+# Goldfish loss: deterministically drop ~1/k of the tokens from the loss to
+# blunt verbatim memorization (train split only; special tokens are never
+# dropped). GOLDFISH_H is the context width hashed to decide each drop and must
+# be < SEQ_LEN; GOLDFISH_K must be >= 2.
+: "${GOLDFISH_LOSS:=false}"
+: "${GOLDFISH_K:=50}"
+: "${GOLDFISH_H:=50}"
+
 # Which id space each corpus was tokenized in, so an incoherent
-# VOCAB/DATASET_NAME pair is caught below rather than trained on. Both globbed
-# blends are mul_200k (_research/lib/common.sh feeds every one of its blends
+# VOCAB/DATASET_NAME pair is caught below rather than trained on. Every globbed
+# blend is mul_200k (_research/lib/common.sh feeds every one of its blends
 # through that tokenizer); climbmix is Apertus-8B-2509 per its own comment.
 # fineweb-edu-100B is deliberately absent: it lives under a `llama_tokenized`
 # path, so it matches NEITHER vocab and is left unguarded as it was before.
 case "$DATASET_NAME" in
-	fineweb2hq-mul200k|swissai-blend) DATASET_VOCAB=200k ;;
-	climbmix)                         DATASET_VOCAB=130k ;;
-	blend-file)                       DATASET_VOCAB=$DATA_BLEND_VOCAB ;;
-	*)                                DATASET_VOCAB= ;;
+	fineweb2hq-mul200k|swissai-blend|chonk-stage1-every3) DATASET_VOCAB=200k ;;
+	climbmix)                                             DATASET_VOCAB=130k ;;
+	blend-file)                                           DATASET_VOCAB=$DATA_BLEND_VOCAB ;;
+	*)                                                    DATASET_VOCAB= ;;
 esac
 
 # -- Container / codebase --
 # (IMAGE_ENV and MEGATRON_LM_DIR come from common/paths.sh)
+# Extra site-packages layered ON TOP of the container image's python (e.g. an
+# upgraded wandb). Set it to a SHARED path (scratch, never /tmp or the image
+# itself: the image's writable overlay is per-node tmpfs and dies with the
+# job). PER_RANK_CMD prepends it to PYTHONPATH inside every task's container,
+# so it shadows the image's own packages on every rank. The install itself is
+# the experiment's job — see launch/chonk/chonk_H3584_h2048_lt1792_ref.sh for
+# the one-task `srun ... pip install --target` pattern. Empty = nothing layered.
+: "${WHEELHOUSE_DIR:=}"
 
 # -- Experiment naming --
 : "${PROJECT_NAME:=large_scale_moe_performance}"
@@ -145,6 +172,10 @@ esac
 
 # -- Checkpointing & resuming --
 : "${CHECKPOINT_STEPS:=100000}"
+# Extra explicit iterations to save at, on top of --save-interval, e.g.
+# "1,2,4,8,16,32,64,128" for an early-training checkpoint ladder. Training
+# continues afterwards. Empty = no --save-iters.
+: "${SAVE_ITERS:=}"
 : "${LOAD_CKPT:=false}"
 : "${AUTO_JOB_REQUEUE:=false}"
 : "${BACKUP_CODEBASE:=false}"
@@ -158,6 +189,12 @@ esac
 
 # -- Debugging / profiling --
 : "${TENSORBOARD_LOG_INTERVAL:=}"       # empty = Megatron default (1)
+# MuonMD/Muon diagnostics: gain magnitudes, update sparsity and the per-layer
+# breakdown of both. Cheap, but --log-muon-per-layer multiplies the tensorboard
+# series by the layer count. Only meaningful with a muon-family OPTIMIZER.
+: "${LOG_MUON:=false}"
+: "${MUON_LOG_INTERVAL:=50}"
+: "${MUON_SPARSITY_THRESHOLDS:="1e-8 1e-12"}"
 : "${LOG_NCCL:=false}"
 : "${NSYS_PROFILER:=false}"
 : "${TORCH_PROFILER:=false}"
@@ -192,6 +229,10 @@ fi
 # DOMAIN CONFIGS
 # Order matters: engine.sh reads GBS/MBS/OPTIMIZER set by model.sh.
 # =============================================================================
+# warmup-kda.sh needs the model env (MODEL_NAME) and TP/SEQ_LEN for its default
+# archive path; the knobs it defines are consumed further down (seed splice,
+# launch gate).
+source "$COMMON_DIR/warmup-kda.sh"
 source "$COMMON_DIR/model.sh"
 source "$COMMON_DIR/engine.sh"
 source "$COMMON_DIR/prelaunch.sh"
@@ -235,6 +276,15 @@ if [ "$DATASET_NAME" == "fineweb2hq-mul200k" ]; then
 	: "${DATA_SOURCES:=swissai-fineweb-2-hq-mmbert-full-quality_10-filterrobots-fwedu_spp_annotated}"
 fi
 
+# chonk-stage1-every3: the scaling-ladder stage-1 blend (every 3rd shard of the
+# apertus-v2-20260722 first_stage mixture). DATA_SOURCES="." globs the whole
+# tree recursively — the shards sit in per-subset subdirs, and Megatron infers
+# token-proportional weights over the flat prefix list, same as the ladder does.
+if [ "$DATASET_NAME" == "chonk-stage1-every3" ]; then
+	: "${DATA_ROOT:=$CHONK_STAGE1_DIR}"
+	: "${DATA_SOURCES:=.}"
+fi
+
 # swissai-blend: the default swissai pretraining mixture (dclm-edu + fineweb-2
 # euro-high/euro-mid/other-high).
 if [ "$DATASET_NAME" == "swissai-blend" ]; then
@@ -251,6 +301,10 @@ fi
 # dump-N/00000_tokens.*), strip the extension and hand Megatron the flat prefix
 # list. Blend weights are inferred from shard lengths, so the mixture stays
 # token-proportional across sources — do NOT add explicit weights here.
+# find -L: subsampled blends (e.g. chonk-stage1-every3) are trees of SYMLINKS
+# into the full mixture. Without -L those are -type l, not -type f, and the glob
+# comes back empty on a directory that plainly has shards in it. Broken links
+# are silently skipped, which is what we want — a dangling shard is not data.
 DATA_SHARDS=()
 if [ -n "$DATA_SOURCES" ] && [ -z "$DATA_BLEND_FILE" ]; then
 	for src in $DATA_SOURCES; do
@@ -258,7 +312,7 @@ if [ -n "$DATA_SOURCES" ] && [ -z "$DATA_BLEND_FILE" ]; then
 		[ -d "$d" ] || { echo "[$(date)] ERROR: data source not found: $d" >&2; exit 1; }
 		while IFS= read -r p; do
 			DATA_SHARDS+=("$p")
-		done < <(find "$d" -type f \( -name '*.bin' -o -name '*.idx' \) \
+		done < <(find -L "$d" -type f \( -name '*.bin' -o -name '*.idx' \) \
 		             | sed -E 's/\.[^.]+$//' | sort -u)
 	done
 	[ "${#DATA_SHARDS[@]}" -gt 0 ] || { echo "[$(date)] ERROR: no .bin/.idx shards under $DATA_ROOT" >&2; exit 1; }
@@ -338,15 +392,25 @@ LOGGING_ARGS=(
 	--log-timers-to-tensorboard
 	# --log-params-norm
 	--moe-per-layer-logging
-	--log-memory-interval 5
+	--log-memory-interval 10
 	--log-device-memory-used
 
-	--timing-log-level 2
-	--log-straggler
+	# --timing-log-level 2
+	# --log-straggler
 
 	# --comm-simulator
 	# --comm-simulator-disk-load
 )
+
+if [ "$LOG_MUON" = true ]; then
+	LOGGING_ARGS+=(
+		--log-muon-gains
+		--log-muon-sparsity
+		--log-muon-per-layer
+		--muon-sparsity-thresholds $MUON_SPARSITY_THRESHOLDS
+		--muon-log-interval $MUON_LOG_INTERVAL
+	)
+fi
 
 if [ "$CHECK_GRAD_NORM" = true ]; then
 	LOGGING_ARGS+=(--check-grad-norm)
@@ -398,6 +462,10 @@ else
 	)
 fi
 
+if [ -n "$SAVE_ITERS" ]; then
+	CHECKPOINTING_ARGS+=(--save-iters $SAVE_ITERS)
+fi
+
 DATA_ARGS=(
 	--split 100,0,0
 	--seq-length $SEQ_LEN
@@ -419,12 +487,21 @@ if [ -n "$PACKING_STRATEGY" ]; then
 	DATA_ARGS+=(--pretraining-packing-strategy $PACKING_STRATEGY)
 fi
 
+if [ "$INTER_DOCUMENT_MASKING" = true ]; then
+	DATA_ARGS+=(--dataloader-inter-document-masking)
+fi
+
+if [ "$GOLDFISH_LOSS" = true ]; then
+	DATA_ARGS+=(
+		--goldfish-loss
+		--goldfish-k $GOLDFISH_K
+		--goldfish-h $GOLDFISH_H
+	)
+fi
+
 DATA_ARGS+=(
 	--num-workers $NUM_WORKERS
 	--num-dataset-builder-threads 1
-	# --goldfish-loss  # goldfish
-	# --goldfish-k 50  # goldfish
-	# --goldfish-h 50  # goldfish
 )
 
 # =============================================================================
@@ -522,10 +599,27 @@ TRAINING_CMD="python3 $MEGATRON_LM_DIR/pretrain_gpt.py \
 	${MLA_ARGS[@]} \
     $DATA_ARGS"
 
+# Warm-up-pass command (common/warmup-kda.sh): the SAME run minus
+# checkpointing/logging/profiling — no --save, so --exit-interval cannot dump a
+# checkpoint on the way out — on a capped shard blend. kda_warm_ensure decides
+# whether it runs at all; WARMUP_ITERS stops it.
+WARMUP_CMD=""
+if [ "$KDA_FUSED" = true ] && [ "$KDA_WARMUP" != "off" ]; then
+	WARMUP_CMD="python3 $MEGATRON_LM_DIR/pretrain_gpt.py \
+		${TRANSFORMER_ENGINE_ARGS[*]} ${NETWORK_SIZE_ARGS[*]} \
+		${REGULARIZATION_ARGS[*]} ${RECOMPUTE_ARGS[*]} ${TRAINING_ARGS[*]} \
+		${INITIALIZATION_ARGS[*]} ${LEARNING_RATE_ARGS[*]} ${MIXED_PRECISION_ARGS[*]} \
+		${DISTRIBUTED_ARGS[*]} ${TOKENIZER_ARGS[*]} $(kda_warm_opt_args) \
+		${MOE_ARGS[*]} ${MLA_ARGS[*]} $(kda_warm_data_args) \
+		--exit-interval $WARMUP_ITERS"
+fi
+
 # =============================================================================
 # WANDB
 # =============================================================================
 export TRANSFORMERS_NO_SLOW_TOKENIZER=1
+export WANDB_ENTITY=apertus
+export WANDB_PROJECT=$PROJECT_NAME
 
 if [ -n "$WANDB_API_KEY" ]; then
   echo "[$(date)] WANDB API key detected. Enabling WANDB logging."
@@ -609,8 +703,8 @@ echo -e "\nExperiment file: $0\n" >> $COMPUTE_ENVIRONMENT_DIR
 cat $0 >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
-echo -e "\nEngine files: $ENGINE_PATH , paths.sh , model.sh , engine.sh , $RECIPE_FILE\n" >> $COMPUTE_ENVIRONMENT_DIR
-cat "$ENGINE_PATH" "$COMMON_DIR/paths.sh" "$COMMON_DIR/model.sh" "$COMMON_DIR/engine.sh" "$RECIPE_FILE" >> $COMPUTE_ENVIRONMENT_DIR
+echo -e "\nEngine files: $ENGINE_PATH , paths.sh , model.sh , engine.sh , warmup-kda.sh , $RECIPE_FILE\n" >> $COMPUTE_ENVIRONMENT_DIR
+cat "$ENGINE_PATH" "$COMMON_DIR/paths.sh" "$COMMON_DIR/model.sh" "$COMMON_DIR/engine.sh" "$COMMON_DIR/warmup-kda.sh" "$RECIPE_FILE" >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "" >> $COMPUTE_ENVIRONMENT_DIR
 printf '=%.0s' {1..100} >> $COMPUTE_ENVIRONMENT_DIR
 echo -e "\nTOML file: $SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment\n" >> $COMPUTE_ENVIRONMENT_DIR
@@ -685,7 +779,7 @@ mkdir -p \$TRITON_CACHE_DIR \$TORCHINDUCTOR_CACHE_DIR \$TORCH_EXTENSIONS_DIR;"
 # tools/ep_cross_group_ranks.py) derives ranks from the allocation order; this
 # makes each run carry the ground truth so a trace can be checked instead of
 # trusted. grep RANKMAP on the .out to recover it.
-PER_RANK_CMD="$CACHE_ENV export PYTHONPATH=$NVRX_SHIM:\$PYTHONPATH; echo RANKMAP \$SLURM_PROCID \$SLURMD_NODENAME; export SLURM_PROCID=\$SLURM_PROCID; LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
+PER_RANK_CMD="$CACHE_ENV $(kda_warm_seed_cmd) export PYTHONPATH=${WHEELHOUSE_DIR:+$WHEELHOUSE_DIR:}$NVRX_SHIM:\$PYTHONPATH; echo RANKMAP \$SLURM_PROCID \$SLURMD_NODENAME; export SLURM_PROCID=\$SLURM_PROCID; LAUNCHER=''; if [[ \" $RANK_TO_PROFILE \" == *\" \$SLURM_PROCID \"* ]]; then LAUNCHER=\"$NSYS_LAUNCHER\"; fi; $UCCL_ENV_PREFIX RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $CMD_PREFIX \$LAUNCHER $TRAINING_CMD"
 PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
 # --wait 60 / --kill-on-bad-exit=1: once one task exits, give the rest 60s and
 # then tear the step down, so a single dead rank can't leave the others spinning
@@ -698,6 +792,7 @@ PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
 SRUN_LAUNCH="srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix --distribution=block:block --network=disable_rdzv_get --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
 
 if [ "$DRY_RUN" = true ]; then
+	kda_warm_check   # report-only under DRY_RUN (the submission warms itself up)
 	echo
 	echo "============================ DRY RUN ============================"
 	echo "# Everything below is a complete sbatch script: save it to a file and"
@@ -714,6 +809,9 @@ if [ "$DRY_RUN" = true ]; then
 	[ -z "$WANDB_API_KEY" ] && echo "export WANDB_MODE=disabled"
 	if [ "$USE_UCCL" = true ]; then
 		echo "export NUM_MAX_NVL_PEERS=$NUM_MAX_NVL_PEERS UCCL_EP_TRANSPORT=$UCCL_EP_TRANSPORT${UCCL_EP_CPU_TIMEOUT_SECS:+ UCCL_EP_CPU_TIMEOUT_SECS=$UCCL_EP_CPU_TIMEOUT_SECS}"
+	fi
+	if [ "$KDA_FUSED" = true ]; then
+		echo "export $KDA_LEVERS"
 	fi
 	# Pretty-print: srun options one per line; the single-quoted bash -c body is
 	# split before each --arg into concatenated 'fragments' ("...'\" + newline +
@@ -739,6 +837,11 @@ fi
 # Either may auto-exclude nodes and exit to resubmit on a fresh allocation.
 prelaunch_nccl_a2a
 prelaunch_ep_bench
+
+# Fused KDA: make sure the Triton archive exists — running the warm-up pass
+# in-job on a node subset if it is missing/thin — then gate the launch on it.
+kda_warm_ensure
+kda_warm_check
 
 if [ "$AUTO_JOB_REQUEUE" = true ]; then
 	echo "[$(date)] $(sbatch --dependency=singleton $0)"

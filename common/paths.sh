@@ -33,6 +33,11 @@
 : "${FW2HQ_DIR:=/iopsstor/scratch/cscs/ahuang/fwedu}"
 # The swissai pretraining blend (dclm-edu + fineweb-2 euro/other splits).
 : "${SWISSAI_DATA_DIR:=/iopsstor/scratch/cscs/jpcoles/a06}"
+# The chonk stage-1 blend, every-3rd-shard subsample of the apertus-v2-20260722
+# first_stage mixture, mul_200k tokenized. Same root the scaling-ladder size
+# file uses (kda-120b-moe-256e-latent-kda31-nope.sh); globbed recursively by
+# DATASET_NAME=chonk-stage1-every3 in common/train.sh.
+: "${CHONK_STAGE1_DIR:=/iopsstor/scratch/cscs/ahuang/chonk-stage1-every3}"
 
 # -- Tokenizer --
 : "${TOKENIZER_DIR:=/iopsstor/scratch/cscs/gfu/datasets/tokenizers}"

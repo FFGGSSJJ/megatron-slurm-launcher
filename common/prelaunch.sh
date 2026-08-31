@@ -27,13 +27,16 @@
 # so that one file is the whole exclusion set -- the job is resubmitted by
 # $PREFLIGHT_RESUBMIT (submit.sh by default -- reservation, job-name, log paths;
 # launch/research/gate.sh swaps in the _research launcher), and this job exits
-# WITHOUT training. The singleton dependency queues the replacement until this
-# allocation is gone, so it re-benches a fresh allocation and either trains or
-# repeats. Two budgets stop a false positive from eating the cluster:
-# EP_PREFLIGHT_MAX_NODES caps dynamic_exclude.txt: once the exclusion set would
-# grow past it the loop stops bouncing. dynamic_exclude.txt is a
-# plain node list, never annotated -- prune it by hand when nodes heal; the
-# curated exclude lists are only read, never written.
+# WITHOUT training. The replacement carries --dependency=afterany on THIS job
+# id, so it queues until this allocation is gone and then re-benches a fresh
+# one, and either trains or repeats. Not singleton: that matches on the job
+# NAME, which submit.sh derives from the model, so any other job of the same
+# model -- a concurrent run, a queued AUTO_JOB_REQUEUE chain -- would have held
+# the replacement back for its whole runtime. One budget stops a false positive
+# from eating the cluster: EP_PREFLIGHT_MAX_NODES caps dynamic_exclude.txt, and
+# once the exclusion set would grow past it the loop stops bouncing.
+# dynamic_exclude.txt is a plain node list, never annotated -- prune it by hand
+# when nodes heal; the curated exclude lists are only read, never written.
 #
 # Clean benches do the mirror write: the allocation is added to common/filter/
 # dynamic_include.txt, kept disjoint from the exclude list (exclusion wins).
@@ -48,7 +51,7 @@
 : "${EP_PREFLIGHT_SPREAD:=1.2}"        # blame ONE node only above this in-group spread
 : "${EP_PREFLIGHT_MAX_NODES:=256}"     # hard cap on dynamic_exclude.txt entries (counts seeded/absorbed ones too)
 : "${EP_PREFLIGHT_ON_EXHAUST:=run}"    # budget spent: run = train anyway, stop = halt chain
-: "${NCCL_PREFLIGHT:=true}"            # raw-NCCL a2a gate before the EP bench
+: "${NCCL_PREFLIGHT:=false}"            # raw-NCCL a2a gate before the EP bench
 : "${NCCL_PREFLIGHT_EP:=}"             # empty = follow the training $EP
 : "${NCCL_PREFLIGHT_SIZE_MB:=64}"      # a2a bytes per rank (single fixed size)
 : "${NCCL_PREFLIGHT_ITERS:=20}"
@@ -205,8 +208,19 @@ preflight_record_include() {
 	[ -n "$good" ] || return 0
 	printf '%s\n' "$good" >> "$inc"
 	sort -u -o "$inc" "$inc"
+	# Report-only disjointness check: submission already lets exclusion win, but
+	# an overlap means one of the lists drifted (hand edit, missed prune) and
+	# $inc overstates the usable nodes. sort -u both sides before comm -- $dyn
+	# may have been hand-pruned out of sort order, which would garble comm.
+	local overlap=""
+	[ -r "$dyn" ] && overlap=$(comm -12 <(sort -u "$inc") <(sort -u "$dyn"))
 	echo "[prelaunch] clean bench: +$(printf '%s\n' "$good" | wc -l) node(s) to the" \
-	     "include list ($inc now holds $(wc -l < "$inc"))"
+	     "include list ($inc now holds $(wc -l < "$inc"); include/exclude are" \
+	     "$([ -n "$overlap" ] && echo NOT disjoint || echo disjoint))"
+	if [ -n "$overlap" ]; then
+		echo "[prelaunch] overlap nodes (exclusion wins at submission):"
+		printf '%s\n' "$overlap" | sed 's/^/  /'
+	fi
 }
 
 # Nodes the CURRENT job actually excludes, plus the dynamic list. Slurm's own
@@ -223,11 +237,19 @@ preflight_listed_nodes() {
 	} | sed '/^[[:space:]]*$/d' | sort -u
 }
 
+# The dependency every resubmitter hands to sbatch: wait for THIS allocation to
+# die, and nothing else. Empty when SLURM_JOB_ID is unset (submit immediately)
+# rather than emitting a malformed --dependency=afterany: that sbatch rejects.
+preflight_after_this_job() {
+	[ -n "${SLURM_JOB_ID:-}" ] && printf -- '--dependency=afterany:%s' "$SLURM_JOB_ID"
+	return 0
+}
+
 # Default resubmitter (PREFLIGHT_RESUBMIT): hand $0 back to submit.sh, never to
-# bare sbatch -- the reservation, the derived --job-name (what
-# --dependency=singleton matches on) and the dated --output/--error all live
-# there, not in the launch script's headers. A launcher that submits its own way
-# (see launch/research/gate.sh) sets PREFLIGHT_RESUBMIT to its own function.
+# bare sbatch -- the reservation, the derived --job-name and the dated
+# --output/--error all live there, not in the launch script's headers. A
+# launcher that submits its own way (see launch/research/gate.sh) sets
+# PREFLIGHT_RESUBMIT to its own function.
 preflight_resubmit_submit_sh() {
 	local submit="$SCRIPTS_ROOT/submit.sh"
 	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
@@ -235,11 +257,11 @@ preflight_resubmit_submit_sh() {
 		# no EXCLUDE_FILE override: submit.sh already defaults to the dynamic
 		# list, which now holds the union. EXTRA_SBATCH_ARGS (e.g. --nodes) is
 		# kept across the resubmit.
-		EXTRA_SBATCH_ARGS="--dependency=singleton ${EXTRA_SBATCH_ARGS:-}" \
+		EXTRA_SBATCH_ARGS="$(preflight_after_this_job) ${EXTRA_SBATCH_ARGS:-}" \
 			bash "$submit" "$0"
 	else
 		echo "[prelaunch] no $submit -- falling back to bare sbatch (no reservation!)" >&2
-		sbatch --dependency=singleton --exclude="$(paste -sd, - "$dyn")" "$0"
+		sbatch $(preflight_after_this_job) --exclude="$(paste -sd, - "$dyn")" "$0"
 	fi
 }
 

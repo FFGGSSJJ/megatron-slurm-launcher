@@ -5,7 +5,8 @@
 # Sourced by common/train.sh AFTER common/model.sh (it reads GBS/MBS/OPTIMIZER
 # from there). Do not run directly. Owns *how* the run is parallelized and made
 # fast: TP/PP/EP/ETP/CP + virtual pipeline, MoE perf optimizations (dispatcher,
-# grouped GEMM, comm overlap, expert offloading, fp8 kernels), and recompute.
+# grouped GEMM, comm overlap, expert offloading, fp8 kernels), recompute, and the
+# fused KDA runtime.
 #
 # Knobs + their defaults live at the top; an experiment overrides one simply by
 # assigning it before sourcing train.sh.
@@ -27,6 +28,7 @@
 : "${OVERLAP_MOE_EP_COMM:=false}"        # --overlap-moe-expert-parallel-comm + --delay-wgrad-compute
 : "${USE_EXPERTS_OFFLOADING:=false}"
 : "${USE_OFFLOADING_DEBUG:=false}"        # --moe-offloading-experts-debug-mode
+: "${OFFLOADING_MODE:="coarse-grained"}"             # coarse-grained | fine-grained
 : "${OFFLOADING_NUM_CHUNKS:=8}"
 : "${OFFLOADING_NUM_STAGES:=2}"
 : "${USE_FP8_MOE_PARAM:=false}"         # --moe-use-inplace-fp8-param + --moe-use-extra-fp8-param-storage (adds fp8moe- prefix)
@@ -38,6 +40,27 @@
 # -- Grad Accumulation Fusion --
 : "${NO_GRAD_ACC_FUSION:=false}"
 
+# -- CUDA Graphs --
+: "${USE_CUDA_GRAPHS:=false}"
+: "${CUDA_GRAPH_IMPL:=transformer_engine}"
+: "${CUDA_GRAPH_SCOPE:="moe_router moe_preprocess"}"
+
+# -- Fused KDA (linear attention) --
+# KimiDeltaAttention resolves five KDA_* env levers at layer construction; with
+# them unset it falls back to an unfused torch path with no warning. KDA_FUSED
+# exports them. Only meaningful with ATTENTION_TYPE=kda.
+#
+# There is nothing to install: the training image
+# (pytorch2511_..._deepgemm_fla5_uccl_fix.sqsh) already ships FLA 0.5.x, on
+# which these levers actually engage. The _research port of this
+# (lib/kda_fused.sh) pip-installs FLA because its image is still on 0.4.0,
+# where every lever capability-probes itself back off.
+#
+# The fused path is Triton, and compiling it cold at scale hangs the job --
+# see common/warmup-kda.sh, which is what builds and seeds the kernel archive.
+: "${KDA_FUSED:=false}"
+# The five levers kimi_delta_attention.py resolves at layer construction.
+: "${KDA_LEVERS:=KDA_USE_GATE_IN_KERNEL=1 KDA_FUSED_GATE=1 KDA_QK_L2NORM_IN_KERNEL=1 KDA_CONV1D_CUDA=1 KDA_FUSED_LOW_RANK_GATHER=1}"
 
 # -- Recompute --
 : "${RECOMPUTE_MODULES:=layernorm}"     # space-separated list, e.g. "layernorm mla_up_proj"
@@ -61,6 +84,10 @@ fi
 # ---- Args -------------------------------------------------------------------
 # moe related optimizations
 OPTIMIZATION_ARGS=(
+	# Cross Entropy Loss fusion
+	--cross-entropy-loss-fusion
+	--cross-entropy-fusion-impl te
+
 	# Token dispatcher
 	--moe-token-dispatcher-type $TOKEN_DISPATCHER_TYPE
 
@@ -90,6 +117,7 @@ fi
 if [ "$USE_EXPERTS_OFFLOADING" = true ]; then
 	OPTIMIZATION_ARGS+=(
 		--moe-use-offloading-experts
+		--moe-offloading-mode $OFFLOADING_MODE
 		--moe-offloading-num-chunks $OFFLOADING_NUM_CHUNKS
 		--moe-offloading-num-stages $OFFLOADING_NUM_STAGES
 	)
@@ -133,6 +161,15 @@ fi
 if [ "$NO_GRAD_ACC_FUSION" = true ]; then
 	OPTIMIZATION_ARGS+=(
 		--no-gradient-accumulation-fusion
+	)
+fi
+
+# Args for CUDA Graphs
+if [ "$USE_CUDA_GRAPHS" = true ]; then
+	export NCCL_GRAPH_REGISTER=0
+	OPTIMIZATION_ARGS+=(
+		--cuda-graph-impl $CUDA_GRAPH_IMPL
+		--cuda-graph-scope $CUDA_GRAPH_SCOPE
 	)
 fi
 
@@ -186,4 +223,12 @@ if [ "$OPTIMIZER" == "md_decoupling" ]; then
 		--overlap-grad-reduce
 		# --overlap-param-gather
 	)
+fi
+
+# ---- Fused KDA runtime -------------------------------------------------------
+# The levers ride srun's default --export=ALL into the container, like uccl.sh's
+# env. FLA itself comes from the image, so there is nothing to install here.
+if [ "$KDA_FUSED" = true ]; then
+	export $KDA_LEVERS
+	echo "[$(date)] KDA_FUSED: $KDA_LEVERS"
 fi
