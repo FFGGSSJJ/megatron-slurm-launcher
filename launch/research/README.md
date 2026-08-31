@@ -26,7 +26,9 @@ submit.sh --> train.sbatch -----> gate.sh ----- if clean --> srun training
 ```
 
 The resubmit is the *same* `_research` job, not a wrapper: same `--job-name`
-(so `--dependency=singleton` queues it behind this allocation), same nodes/time,
+(`--dependency=afterany:$SLURM_JOB_ID` queues it behind this allocation and
+behind nothing else — not `singleton`, which would also have queued it behind
+every other job sharing that name), same nodes/time,
 `--export=ALL` so `AUTO_REQUEUE`/`REQUEUE_COUNT`/`RESERVATION`/recipe knobs
 survive the bounce. The only bound is `EP_PREFLIGHT_MAX_NODES`, the size of
 the exclude list — bouncing is unlimited, since a bounce costs one allocation

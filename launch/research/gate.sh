@@ -7,8 +7,9 @@
 # BEFORE lib/common.sh -- the one point where the config is fully known and no
 # training has started yet. It benches this allocation's all-to-all with
 # nccl-tests; a slow group's culprit nodes go into common/filter/
-# dynamic_exclude.txt and the SAME _research job is resubmitted (singleton, so
-# it waits for this allocation to die) instead of training. A clean gate records
+# dynamic_exclude.txt and the SAME _research job is resubmitted (afterany on
+# this job id, so it waits for this allocation to die -- and only for it)
+# instead of training. A clean gate records
 # the allocation in dynamic_include.txt and falls through to training.
 #
 # Wiring, once, in the _research repo (this repo is its `slurm-launcher` submodule):
@@ -48,7 +49,7 @@ preflight_resubmit_research() {
 	local tl
 	tl=$(scontrol show job "${SLURM_JOB_ID:-}" 2>/dev/null | sed -n 's/.*TimeLimit=\([^ ]*\).*/\1/p' | head -1)
 	sbatch \
-		--dependency=singleton \
+		$(preflight_after_this_job) \
 		--nodes="${SLURM_NNODES:-1}" \
 		--time="${REQUEUE_TIME:-${tl:-${DEFAULT_TIME:-10:00:00}}}" \
 		--job-name="${SLURM_JOB_NAME:-$SIZE-$RECIPE}" \
